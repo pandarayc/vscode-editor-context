@@ -1,0 +1,96 @@
+{
+  "name": "editor-context",
+  "displayName": "Editor Context — share what you're looking at",
+  "description": "Publishes the file and line range you are looking at in Cursor/VS Code so any agent can know it: a state file for hooks and (coming) an MCP server for tool-calling agents.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "publisher": "pandarayc",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Editor Context",
+      "properties": {
+        "editorContext.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Publish the current file and line range. Turning this off removes this window's state file."
+        },
+        "editorContext.stateDir": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Directory that receives `windows/<pid>.json`. Empty means `~/.editor-context`."
+        },
+        "editorContext.excludeGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/.env",
+            "**/.env.*",
+            "**/*.pem",
+            "**/*.key",
+            "**/id_rsa*",
+            "**/id_ed25519*",
+            "**/.ssh/**",
+            "**/node_modules/**"
+          ],
+          "markdownDescription": "Files matching any of these globs are never published — the agent is told nothing at all, not even the path. A pattern containing `/` matches the workspace-relative path; a bare pattern matches the file name."
+        },
+        "editorContext.language": {
+          "type": "string",
+          "enum": [
+            "zh",
+            "en"
+          ],
+          "default": "zh",
+          "description": "Language of the injected context text."
+        },
+        "editorContext.debounceMs": {
+          "type": "number",
+          "default": 150,
+          "minimum": 0,
+          "description": "Quiet period before a cursor/selection change is written to disk."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "editorContext.showState",
+        "title": "Editor Context: Show State File"
+      },
+      {
+        "command": "editorContext.copyContext",
+        "title": "Editor Context: Copy Current Position as Context"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "node --test test/core.test.mjs test/hook.test.mjs",
+    "package": "npx --yes @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.7.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pandarayc/vscode-editor-context.git"
+  },
+  "homepage": "https://github.com/pandarayc/vscode-editor-context#readme",
+  "bugs": {
+    "url": "https://github.com/pandarayc/vscode-editor-context/issues"
+  }
+}
