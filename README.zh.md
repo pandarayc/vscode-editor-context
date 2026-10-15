@@ -49,7 +49,7 @@
 
 ### 方式一：Remote-SSH / 远端（Cursor 跑在另一台机器上）
 
-远端窗口里**没有** `cursor` CLI（CLI 在客户端那台机器上），所以扩展必须装进**服务器侧**的扩展目录。用带上的脚本：
+远端窗口里**没有** `cursor` CLI（CLI 在客户端那台机器上），所以扩展必须装进**服务器侧**的扩展目录。脚本要从本仓库取（它**故意不放进 VSIX**：需要它的那台机器恰恰是跑不了 `cursor` 的那台）：
 
 ```bash
 node scripts/install-cursor-remote.mjs --vsix ./editor-context-0.1.0.vsix

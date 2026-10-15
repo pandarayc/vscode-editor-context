@@ -1,5 +1,7 @@
 # editor-context
 
+<img src="icon.png" width="96" alt="">
+
 > **[English](README.md) · [中文](README.zh.md)**
 
 Publish which lines you are looking at in Cursor / VS Code, so any agent on the same machine can know.
@@ -50,7 +52,7 @@ One window file looks like this:
 
 ### Option 1: Remote-SSH (Cursor runs on another machine)
 
-A remote window has **no** `cursor` CLI — that lives on the client machine — so the extension must be placed in the **server-side** extension directory. Use the bundled script:
+A remote window has **no** `cursor` CLI — that lives on the client machine — so the extension must be placed in the **server-side** extension directory. Get the script from a checkout of this repository (it is deliberately not inside the VSIX: the machine that needs it is the one that cannot run `cursor`):
 
 ```bash
 node scripts/install-cursor-remote.mjs --vsix ./editor-context-0.1.0.vsix

@@ -2,6 +2,7 @@
   "name": "editor-context",
   "displayName": "Editor Context — share what you're looking at",
   "description": "Publishes the file and line range you are looking at in Cursor/VS Code as one state file per window, so hooks, plugins and agents on the same machine can know where you are.",
+  "icon": "icon.png",
   "version": "0.1.0",
   "license": "MIT",
   "publisher": "pandarayc",
