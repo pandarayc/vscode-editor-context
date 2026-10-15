@@ -103,7 +103,11 @@ async function main() {
       installedTimestamp: Date.now(),
       source: 'vsix',
       id: uuid,
-      publisherId: 'local',
+      // The publisher's id, which for a VSIX is the manifest's publisher name.
+      // This used to be the literal 'local', which silently went stale the
+      // moment the manifest changed publisher and left the cache disagreeing
+      // with the directory it had just written.
+      publisherId: manifest.publisher,
       publisherDisplayName: manifest.publisher,
       targetPlatform: 'undefined',
       updated: false,
