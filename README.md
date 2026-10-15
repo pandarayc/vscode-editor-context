@@ -1,26 +1,28 @@
 # editor-context
 
-把「你在 Cursor / VS Code 里正看着哪几行」发布出去，让任意 agent 都能知道。
+> **[English](README.md) · [中文](README.zh.md)**
 
-一个扩展，两种消费者：**状态文件**（给 hook 用，也就是当前这一版）和一个 **MCP server**（规划中，给会调工具的 agent 用）。
+Publish which lines you are looking at in Cursor / VS Code, so any agent on the same machine can know.
 
-> 为什么不是 `@path:11-14`：DSH 的 `@` 提及**只认路径**，行号只存在于 markdown 链接的 `#L11-L14` 片段。本扩展产出的是**给模型看的自然语言描述**，不产出 `@` 记号——那种写法在 DSH 里会被当成一个叫 `src/auth.ts:11-14` 的文件。
+One extension, one collector, several consumers: a **state file** (what ships today), a **Claude Code hook**, and — for DSH — a separate plugin that turns the reading into a chip in the composer.
+
+> Why not just emit `@path:11-14`: DSH's `@` mention grammar is **path-only**; line numbers exist only in markdown links (`#L11-L14`). This extension therefore publishes a plain description rather than an `@` token, which DSH would read as a file literally named `src/auth.ts:11-14`.
 
 ---
 
-## 它做什么
+## What it does
 
-光标一动、选区一变、切文件，扩展就把当前位置原子地写进：
+On every caret move, selection change or file switch, the extension atomically writes the current position to:
 
 ```
 ~/.editor-context/
 └── windows/
-    └── <扩展宿主 pid>.json     # 每个编辑器窗口一个文件
+    └── <extension host pid>.json     # one file per editor window
 ```
 
-**每个窗口写自己的文件**——VS Code/Cursor 每个窗口一个扩展宿主进程，所以不需要锁，也不会互相覆盖；读取方按 mtime 取最新。
+**Each window writes its own file.** VS Code / Cursor run one extension host per window, so there is no lock to take and no window overwrites another; readers take the newest by mtime.
 
-单个窗口文件长这样：
+One window file looks like this:
 
 ```json
 {
@@ -38,45 +40,45 @@
 }
 ```
 
-- `context` 是**已经渲染好**的注入文本——格式化逻辑只有一份（在 TypeScript 里），hook 脚本不做拼装，避免两处措辞漂移。
-- `sig` 是位置的稳定签名（文件 + 行范围 + 是选区还是光标）。列号变化不算变化，所以同一行里左右移动光标不会反复注入。
-- **不采集选中文本**。当前版本只发布「哪个文件的哪几行」。
+- `context` is the **already rendered** injection text. Formatting lives in exactly one place (TypeScript); the hook script assembles nothing, so two authors cannot drift apart in wording.
+- `sig` is the stable identity of a position (file + range + selection-or-caret). A column change is not a change, so moving left and right inside one line does not re-inject.
+- **Selected text is never collected.** This version publishes which lines, not what is on them.
 
 ---
 
-## 安装
+## Install
 
-### 方式一：Remote-SSH / 远端（Cursor 跑在另一台机器上）
+### Option 1: Remote-SSH (Cursor runs on another machine)
 
-远端窗口里**没有** `cursor` CLI（CLI 在客户端那台机器上），所以扩展必须装进**服务器侧**的扩展目录。用带上的脚本：
+A remote window has **no** `cursor` CLI — that lives on the client machine — so the extension must be placed in the **server-side** extension directory. Use the bundled script:
 
 ```bash
 node scripts/install-cursor-remote.mjs --vsix ./editor-context-0.1.0.vsix
 ```
 
-它做两件服务端本来会做的事：把 VSIX 解到 `~/.cursor-server/extensions/local.editor-context-0.1.0/`（`.vsixmanifest` 改名成点号形式），并把条目写进 `extensions/extensions.json`（**会先备份**，且幂等——重跑会替换旧条目而不是追加）。默认探测 `~/.cursor-server`，没有就退到 `~/.vscode-server`；用 `--server <dir>` 显式指定。
+It does the two things the server would otherwise do for you: unpacks the VSIX into `~/.cursor-server/extensions/<publisher>.editor-context-0.1.0/` (renaming `.vsixmanifest` to the dotted form) and writes the entry into `extensions/extensions.json` — **backing it up first**, and idempotently, so re-running replaces the entry instead of appending a duplicate. It probes `~/.cursor-server` and falls back to `~/.vscode-server`; pass `--server <dir>` to be explicit.
 
-**实测：装完不需要手动重启**——Cursor 的扩展宿主会自己激活它，`~/.editor-context/windows/` 立刻出现文件。
+**Measured: no manual restart is needed.** Cursor's extension host activates it on its own, and `~/.editor-context/windows/` shows a file immediately.
 
-### 方式二：本机窗口（Cursor / VS Code 就装在这台机器上）
+### Option 2: A local window (Cursor / VS Code on this machine)
 
 ```bash
 cursor --install-extension editor-context-0.1.0.vsix
-# 或用命令面板：Extensions: Install from VSIX…
+# or: Command Palette → Extensions: Install from VSIX…
 ```
 
-VS Code 同理，`code --install-extension` 即可（两边是同一套扩展 API）。
+VS Code is the same API: `code --install-extension`.
 
-### 方式三：开发模式
+### Option 3: Development mode
 
 ```bash
 cd editor-context
 npm install --cache ../.npm-cache
 npm run compile
-# 用 Cursor 打开本目录，按 F5 起 Extension Development Host
+# open this folder in Cursor and press F5 for an Extension Development Host
 ```
 
-装完打开任意文件、划选几行，然后：
+Then open any file, select a few lines, and:
 
 ```bash
 cat ~/.editor-context/windows/*.json
@@ -84,29 +86,35 @@ cat ~/.editor-context/windows/*.json
 
 ---
 
-## 配置
+## Configuration
 
-| 键 | 默认 | 说明 |
+| Key | Default | Meaning |
 |---|---|---|
-| `editorContext.enabled` | `true` | 关掉会**删除**本窗口的状态文件 |
-| `editorContext.stateDir` | 空 → `~/.editor-context` | 换目录 |
-| `editorContext.excludeGlobs` | `.env` / `*.pem` / `*.key` / `id_rsa*` / `id_ed25519*` / `.ssh/**` / `node_modules/**` | **命中就连路径都不发布**（不只是隐去文本）。含 `/` 的模式匹配工作区相对路径，不含 `/` 的匹配文件名 |
-| `editorContext.language` | `zh` | 注入文本语言，`zh` / `en` |
-| `editorContext.debounceMs` | `150` | 光标抖动的合并窗口 |
+| `editorContext.enabled` | `true` | Turning it off **deletes** this window's state file |
+| `editorContext.stateDir` | empty → `~/.editor-context` | Move the directory |
+| `editorContext.excludeGlobs` | `.env` / `*.pem` / `*.key` / `id_rsa*` / `id_ed25519*` / `.ssh/**` / `node_modules/**` | A match publishes **nothing at all, not even the path** (this is not about hiding the text). A pattern containing `/` matches the workspace-relative path; a bare pattern matches the file name |
+| `editorContext.language` | `zh` | Language of the rendered text: `zh` / `en` |
+| `editorContext.debounceMs` | `150` | Coalescing window for caret jitter |
 
-命令面板里还有 `Editor Context: Show State File` 和 `Copy Current Position as Context`（后者把描述文本拷进剪贴板，可手动粘给任何 agent）。
+Two commands are also registered: `Editor Context: Show State File`, and `Copy Current Position as Context` (puts the description on the clipboard so you can paste it to any agent by hand).
 
 ---
 
-## 接到 DSH
+## Connecting to DSH
 
-用带上的脚本（幂等，**会先备份** `hooks.json`，并且保留你已有的 `PreToolUse` / `PostToolUse`）：
+> **Read this first if you are using DSH.** There are two ways in, and the hook is the wrong one for DSH.
+>
+> The plugin **[`dsh-editor-context`](https://github.com/pandarayc/dsh-editor-context)** reads these state files and offers the position as a chip in the composer — text you type, into your own message.
+>
+> The hook below injects automatically on every prompt. Measured on DSH, that **appends one durable user message per turn** whenever the cursor moves often: the dedup key is the exact position, and a high-cardinality dedup key is no dedup at all. It is kept for editors that are not driving DSH.
+
+The bundled script is idempotent, **backs up** `hooks.json` first, and preserves any `PreToolUse` / `PostToolUse` you already have:
 
 ```bash
-node scripts/install-dsh-hook.mjs            # 先看会写什么：加 --print
+node scripts/install-dsh-hook.mjs            # add --print to see what it would write
 ```
 
-它把 `hooks/editor_context.py` 复制进 `~/.dsh/hooks/`，并在 `~/.dsh/hooks/hooks.json` 里合并一条 `UserPromptSubmit`：
+It copies `hooks/editor_context.py` into `~/.dsh/hooks/` and merges a `UserPromptSubmit` entry into `~/.dsh/hooks/hooks.json`:
 
 ```json
 {
@@ -120,73 +128,73 @@ node scripts/install-dsh-hook.mjs            # 先看会写什么：加 --print
 }
 ```
 
-手动做也一样：把脚本复制过去，再把上面这段合并进 `hooks` 对象即可。
+Doing it by hand is the same two steps: copy the script, merge the object above into `hooks`.
 
-**然后必须重启 dsh-web** —— `configPath` 在 DSH 进程启动时只读一次（`~/.dsh/profiles/web/cordis.patch.yml` 里已有这条备注）。
+**Then restart dsh-web** — `configPath` is read once at DSH process start (a note in `~/.dsh/profiles/web/cordis.patch.yml` says so).
 
-### 四条硬契约（写错会静默失效）
+### Four hard contracts (getting one wrong fails silently)
 
-来自 `@deepseek-ai/dsh-hook-protocol` 的类型声明，本脚本已全部满足，改动时别踩：
+Taken from the `@deepseek-ai/dsh-hook-protocol` type declarations. The bundled script satisfies all four; do not break them when editing:
 
-| 契约 | 说明 |
+| Contract | Why |
 |---|---|
-| `type` 必须是 `command` | `http` / `mcp_tool` / `prompt` / `agent` 处理器会被跳过并警告 |
-| `hookSpecificOutput.hookEventName` 必须等于 `"UserPromptSubmit"` | **不匹配时事件域字段（含 `additionalContext`）被静默丢弃** |
-| 必须是 JSON，不能靠纯 stdout | Claude Code 方言把纯 stdout 当「输出」渲染，不当上下文 |
-| 显式写 `timeout` | 桥接默认 600 秒，不是 Claude Code 的 30 秒 |
+| `type` must be `command` | `http` / `mcp_tool` / `prompt` / `agent` handlers are skipped with a warning |
+| `hookSpecificOutput.hookEventName` must equal `"UserPromptSubmit"` | On a mismatch the event-domain fields (including `additionalContext`) are **dropped silently** |
+| It must be JSON, not bare stdout | The Claude Code dialect renders bare stdout as *output*, not as context |
+| Write `timeout` explicitly | The bridge defaults to 600 seconds, not Claude Code's 30 |
 
-`UserPromptSubmit` 忽略 matcher；匹配到的 hook 串行执行，上下文按 hook 顺序累加。
+`UserPromptSubmit` ignores matchers; matching hooks run serially and their context accumulates in hook order.
 
-### 验证
+### Verifying
 
 ```bash
-echo '{"session_id":"t1"}' | python3 ~/.dsh/hooks/editor_context.py   # 有位置时打印 JSON
-echo '{"session_id":"t1"}' | python3 ~/.dsh/hooks/editor_context.py   # 位置没变 → 无输出（0 字节）
+echo '{"session_id":"t1"}' | python3 ~/.dsh/hooks/editor_context.py   # prints JSON when there is a position
+echo '{"session_id":"t1"}' | python3 ~/.dsh/hooks/editor_context.py   # position unchanged → no output (0 bytes)
 ```
 
-`EDITOR_CONTEXT_DIR` 可覆盖状态目录；`EDITOR_CONTEXT_MAX_AGE_SECONDS`（默认 3600）之后的状态视为过期、不注入。
+`EDITOR_CONTEXT_DIR` overrides the state directory; a reading older than `EDITOR_CONTEXT_MAX_AGE_SECONDS` (default 3600) is treated as stale and not injected.
 
 ---
 
-## 接到 Claude Code
+## Connecting to Claude Code
 
-同一份脚本，放进 `~/.claude/settings.json` 即可（Claude Code 原生认这个格式）。注意 Claude Code 的 `UserPromptSubmit` 支持纯 stdout 上下文与 JSON 两种，本脚本用的 JSON 形式两边都认。
+The same script, dropped into `~/.claude/settings.json` (Claude Code reads that format natively). Note that Claude Code's `UserPromptSubmit` accepts both bare-stdout context and JSON; the JSON form used here works in both places.
 
 ---
 
-## 为什么是 hook，不是只做 MCP
+## Why a hook, and not just MCP
 
-MCP 是**拉取式**的：模型调用工具才拿到数据，它无法把「你正在看第 12 行」推进 prompt。Claude Code 官方的 IDE 集成就是这么切的——它的 IDE server 只把 2 个工具暴露给模型，选区共享走的是 harness 侧的上下文注入。
+MCP is a **pull** interface: the model gets data when it calls a tool, and it cannot push "you are looking at line 12" into the prompt. Claude Code's own IDE integration is split the same way — its IDE server exposes only two tools to the model, and selection sharing goes through harness-side context injection.
 
-所以分工是：
+So the division is:
 
-| 面 | 覆盖 | 状态 |
+| Face | Covers | Status |
 |---|---|---|
-| 状态文件 + hook | 每轮自动知道（模型不用问） | ✅ 本版本 |
-| MCP server | 模型主动查「我在看什么」、让 IDE 跳到某行 | 🚧 规划中 |
+| State file + hook | automatic knowledge every turn (the model need not ask) | ✅ this version |
+| MCP server | the model asking "what am I looking at", and making the IDE jump to a line | not built |
 
-`dsh-hook-protocol` 的官方指引也提醒过：若只服务 DSH，**原生 Cordis 插件**比走 hook 桥接更干净（有完整 harness API）。这里选 hook 面，是为了**同一份脚本能同时接 Claude Code / DSH / Cursor**。
+The `dsh-hook-protocol` guidance makes the same point from the other side: if you are only serving DSH, a **native Cordis plugin** is cleaner than going through the hook bridge, because you get the full harness API. The hook face is chosen here so that **one script serves Claude Code, DSH and Cursor alike** — and for DSH specifically, `dsh-editor-context` is the native plugin.
 
 ---
 
-## 目录
+## Layout
 
 ```
-src/core.ts        纯逻辑：位置模型、glob 排除、渲染（无 vscode 依赖，可单测）
-src/state.ts       原子写 windows/<pid>.json
-src/extension.ts   VS Code 事件接线
-hooks/editor_context.py   UserPromptSubmit hook（零依赖 Python 3.8+）
-test/core.test.mjs        10 个纯逻辑用例
-test/hook.test.mjs        10 个 hook 端到端用例
+src/core.ts         pure logic: position model, glob exclusion, rendering (no vscode import, unit-testable)
+src/state.ts        atomic write of windows/<pid>.json
+src/extension.ts    VS Code event wiring
+hooks/editor_context.py   UserPromptSubmit hook (zero-dependency Python 3.8+)
+test/core.test.mjs        10 pure-logic cases
+test/hook.test.mjs        11 hook end-to-end cases
 ```
 
 ```bash
-npm run compile && npm test    # 20 passed
+npm run compile && npm test    # 21 passed
 ```
 
-## 已知限制
+## Known limitations
 
-- **hook 的「变了才注入」缓存可能需要落进你的工作区。** hooks 由 DSH 的 `ShellExecutor`（`@deepseek-ai/dsh-shell`）起进程，会继承会话的文件沙箱——`~/.editor-context` **可读但不可写**。去重缓存因此按顺序找位置：先试状态目录，失败就退到 `<会话cwd>/.dsh/editor-context/<session>.sig`。项目里多出 `.dsh/editor-context/` 就是它，可加进 `.gitignore`。两处都写不进去时，hook 退回「每轮都注入」而不是静默失效。
-- **只跳单行**：这里不做「高亮 12-15 整段」——DSH 的 `#L` 片段本身也只承载单行（`WorkspaceFileParams.line`）。要区间高亮得靠 IDE 侧自己的能力。
-- **变化才注入**：位置没变就不重复注入（省 token）。副作用是压缩（compact）之后若位置一直没动，那行描述可能不在上下文里了——动一下光标即可重新注入。
-- 多窗口时取**最近更新**的那个窗口；没有「哪个窗口是活动窗口」的跨进程判定。
+- **The hook's "only when it changed" cache may have to live in your workspace.** Hooks are launched by DSH's `ShellExecutor` (`@deepseek-ai/dsh-shell`) and inherit the session's file sandbox: `~/.editor-context` is **readable but not writable**. The dedup cache therefore tries locations in order — the state directory first, then `<session cwd>/.dsh/editor-context/<session>.sig`. A `.dsh/editor-context/` appearing in your project is that; add it to `.gitignore`. With nowhere writable it falls back to injecting every turn rather than failing silently.
+- **Single-line jumps only.** Highlighting a whole 12-15 range is not attempted here: DSH's `#L` fragment itself carries one line (`WorkspaceFileParams.line`). Range highlighting would need the IDE side to do it.
+- **Injects only on change.** An unchanged position is not re-injected, to save tokens. The side effect: after a compaction, if the position has not moved, that description may no longer be in context. Move the caret to get it back.
+- **With several windows, the most recently updated one wins.** There is no cross-process notion of "the active window".
