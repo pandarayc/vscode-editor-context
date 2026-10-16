@@ -1,9 +1,9 @@
 {
   "name": "editor-context",
-  "displayName": "Editor Context — share what you're looking at",
-  "description": "Publishes the file and line range you are looking at in Cursor/VS Code as one state file per window, so hooks, plugins and agents on the same machine can know where you are.",
+  "displayName": "Editor Context \u2014 share what you're looking at",
+  "description": "Publishes the file, line range and selected text you are looking at in Cursor/VS Code, in process to sibling extensions and on disk to subscribed agents.",
   "icon": "icon.png",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "license": "MIT",
   "publisher": "pandarayc",
   "engines": {
@@ -45,7 +45,7 @@
             "**/.ssh/**",
             "**/node_modules/**"
           ],
-          "markdownDescription": "Files matching any of these globs are never published — the agent is told nothing at all, not even the path. A pattern containing `/` matches the workspace-relative path; a bare pattern matches the file name."
+          "markdownDescription": "Files matching any of these globs are never published \u2014 the agent is told nothing at all, not even the path. A pattern containing `/` matches the workspace-relative path; a bare pattern matches the file name."
         },
         "editorContext.language": {
           "type": "string",
@@ -61,10 +61,57 @@
           "default": 150,
           "minimum": 0,
           "description": "Quiet period before a cursor/selection change is written to disk."
+        },
+        "editorContext.sendText": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Include the **selected text** in deliveries, not only the address. Applies to deliveries and never to the ambient `windows/<pid>.json`, which stays an address."
+        },
+        "editorContext.maxTextBytes": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 0,
+          "markdownDescription": "Byte budget for the selected text; the excess is cut and `textTruncated` is set. `0` disables the cap."
+        },
+        "editorContext.ws.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run the WebSocket publisher, so a subscriber can connect and receive deliveries without reading the filesystem."
+        },
+        "editorContext.ws.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "markdownDescription": "Bind address. A **non-loopback** address is refused unless `editorContext.ws.token` is set."
+        },
+        "editorContext.ws.port": {
+          "type": "integer",
+          "default": 7788,
+          "minimum": 0,
+          "markdownDescription": "Port to listen on; `0` picks a free one, which makes the address change on every restart."
+        },
+        "editorContext.ws.path": {
+          "type": "string",
+          "default": "/editor-context",
+          "markdownDescription": "Path of the WebSocket endpoint."
+        },
+        "editorContext.ws.token": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Shared secret a subscriber must present in its `subscribe` frame. Required when binding a non-loopback address."
         }
       }
     },
     "commands": [
+      {
+        "command": "editorContext.addToBot",
+        "title": "Editor Context: Add to Bot",
+        "icon": "$(send)"
+      },
+      {
+        "command": "editorContext.addToBotTargeted",
+        "title": "Editor Context: Add to Bot (choose recipient)\u2026",
+        "icon": "$(send)"
+      },
       {
         "command": "editorContext.showState",
         "title": "Editor Context: Show State File"
@@ -72,18 +119,63 @@
       {
         "command": "editorContext.copyContext",
         "title": "Editor Context: Copy Current Position as Context"
+      },
+      {
+        "command": "editorContext.showSocket",
+        "title": "Editor Context: Show WebSocket Address"
       }
-    ]
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "editorContext.addToBot",
+          "when": "resourceScheme == file",
+          "group": "navigation@9"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "editorContext.addToBot",
+          "when": "resourceScheme == file",
+          "group": "9_cutcopypaste@9"
+        },
+        {
+          "command": "editorContext.addToBotTargeted",
+          "when": "resourceScheme == file",
+          "group": "9_cutcopypaste@10"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "editorContext.addToBot",
+          "when": "resourceScheme == file"
+        },
+        {
+          "command": "editorContext.addToBotTargeted",
+          "when": "resourceScheme == file"
+        },
+        {
+          "command": "editorContext.showState"
+        },
+        {
+          "command": "editorContext.copyContext"
+        },
+        {
+          "command": "editorContext.showSocket"
+        }
+      ]
+    }
   },
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test": "node --test test/core.test.mjs test/hook.test.mjs",
+    "test": "node --test test/core.test.mjs test/delivery.test.mjs test/state.test.mjs test/server.test.mjs test/hook.test.mjs",
     "package": "npx --yes @vscode/vsce package"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.18.2",
     "typescript": "^5.7.0"
   },
   "repository": {
@@ -93,5 +185,8 @@
   "homepage": "https://github.com/pandarayc/vscode-editor-context#readme",
   "bugs": {
     "url": "https://github.com/pandarayc/vscode-editor-context/issues"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
   }
 }

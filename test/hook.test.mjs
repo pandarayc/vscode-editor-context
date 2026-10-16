@@ -131,7 +131,7 @@ test('read-only state dir: cache falls back into the session workspace', async (
 
     const cache = join(cwd, '.dsh', 'editor-context', 's1.sig');
     assert.equal(existsSync(cache), true, 'cache must land in the workspace fallback');
-    assert.equal((await readFile(cache, 'utf8')).trim(), STATE.sig);
+    assert.equal((await readFile(cache, 'utf8')).trim(), `sig=${STATE.sig}`);
   } finally {
     await chmod(dir, 0o700);
   }
@@ -148,4 +148,84 @@ test('a `disabled` file in the state dir switches injection off', async () => {
   const { dir } = await publish(STATE);
   await writeFile(join(dir, 'disabled'), '', 'utf8');
   assert.equal(runHook(dir, { session_id: 's1' }).stdout, '', 'disabled means silent, even on a fresh position');
+});
+
+/** Publish one request document — the same schema, written once, on purpose. */
+async function sendRequest(dir, state, { pid = 1, mtime } = {}) {
+  await mkdir(join(dir, 'requests'), { recursive: true });
+  const file = join(dir, 'requests', `${String(Date.now())}-${String(pid)}.json`);
+  await writeFile(file, JSON.stringify(state), 'utf8');
+  if (mtime !== undefined) await utimes(file, mtime, mtime);
+  return file;
+}
+
+/** The injected context, or '' when the hook stayed quiet. */
+function injected(result) {
+  if (result.stdout === '') return '';
+  return JSON.parse(result.stdout).hookSpecificOutput.additionalContext;
+}
+
+test('an explicit request outranks the ambient reading, even when it is older', async () => {
+  const { dir, file } = await publish({ ...STATE, context: 'AMBIENT' });
+  await sendRequest(dir, { ...STATE, sig: 'src/auth.ts|sel|20-24', context: 'CLICKED' });
+  const stale = new Date(Date.now() - 5_000);
+  await utimes(file, stale, stale);
+
+  // One schema, two producers: "send to agent" is a deliberate act, so it is
+  // served first rather than losing a race with whatever the caret did next.
+  assert.equal(injected(runHook(dir, { session_id: 'req-1' })), 'CLICKED');
+});
+
+test('a request is one-shot, and the ambient reading resumes after it', async () => {
+  const { dir } = await publish({ ...STATE, context: 'AMBIENT' });
+  await sendRequest(dir, { ...STATE, sig: 'clicked', context: 'CLICKED' });
+
+  assert.equal(injected(runHook(dir, { session_id: 'req-2' })), 'CLICKED');
+  assert.equal(injected(runHook(dir, { session_id: 'req-2' })), 'AMBIENT', 'the click is not repeated');
+  assert.equal(injected(runHook(dir, { session_id: 'req-2' })), '', 'and then nothing is new to say');
+});
+
+test('a request the editor refused to publish is ignored, not injected empty', async () => {
+  const { dir } = await publish({ ...STATE, context: 'AMBIENT' });
+  await sendRequest(dir, { ...STATE, sig: 'excluded', context: '' });
+  assert.equal(injected(runHook(dir, { session_id: 'req-3' })), 'AMBIENT');
+});
+
+test('a stale request falls through to the ambient reading', async () => {
+  const { dir } = await publish({ ...STATE, context: 'AMBIENT' });
+  const old = new Date(Date.now() - 7_200_000);
+  await sendRequest(dir, { ...STATE, sig: 'old-click', context: 'OLD' }, { mtime: old });
+  assert.equal(injected(runHook(dir, { session_id: 'req-4' })), 'AMBIENT');
+});
+
+test('with no window state at all, a request still delivers', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'editor-context-reqonly-'));
+  await sendRequest(dir, { ...STATE, sig: 'only', context: 'CLICKED ALONE' });
+  assert.equal(injected(runHook(dir, { session_id: 'req-5' })), 'CLICKED ALONE');
+});
+
+test('a request and the ambient reading do not take turns re-injecting', async () => {
+  const { dir } = await publish({ ...STATE, context: 'AMBIENT' });
+  await sendRequest(dir, { ...STATE, sig: 'clicked', context: 'CLICKED' });
+  const session = { session_id: 'req-6' };
+
+  // Two documents, two slots in the cache. With one slot they would alternate
+  // forever: inject the click, then the caret, then the click again.
+  assert.equal(injected(runHook(dir, session)), 'CLICKED');
+  assert.equal(injected(runHook(dir, session)), 'AMBIENT');
+  assert.equal(injected(runHook(dir, session)), '');
+  assert.equal(injected(runHook(dir, session)), '', 'still quiet, and still quiet on the turn after that');
+
+  // A second, distinct click is a new deliberate act and must get through.
+  await sendRequest(dir, { ...STATE, sig: 'clicked-again', context: 'CLICKED AGAIN' });
+  assert.equal(injected(runHook(dir, session)), 'CLICKED AGAIN');
+  assert.equal(injected(runHook(dir, session)), '');
+});
+
+test('a pre-0.2 cache still dedups after the format change', async () => {
+  const { dir } = await publish(STATE);
+  await chmod(dir, 0o700);
+  // An older hook wrote the bare signature.
+  await writeFile(join(dir, '.injected-legacy'), STATE.sig, 'utf8');
+  assert.equal(injected(runHook(dir, { session_id: 'legacy' })), '', 'a bare signature is still a signature');
 });

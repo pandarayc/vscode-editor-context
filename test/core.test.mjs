@@ -64,32 +64,44 @@ test('toPosix normalizes Windows separators', () => {
   assert.equal(toPosix('a\\b\\c.ts'), 'a/b/c.ts');
 });
 
-test('renderContext (zh): a selection names the range and the read hint', () => {
+test('renderContext (zh): one line, an absolute path and a range', () => {
   const text = renderContext(input());
-  assert.match(text, /Cursor/);
-  assert.match(text, /src\/auth\.ts 第 11-14 行/);
-  assert.match(text, /共 4 行/);
-  assert.match(text, /offset=11, limit=4/);
-  // The `@path:line` spelling is unreadable to DSH, so it must never appear.
-  assert.doesNotMatch(text, /@src\/auth\.ts:11/);
+  assert.equal(text, '[编辑器位置] /w/src/auth.ts 第 11-14 行');
+  // Everything the reader can derive is left out on purpose.
+  assert.doesNotMatch(text, /共 4 行/);
+  assert.doesNotMatch(text, /offset=/);
+  assert.doesNotMatch(text, /Cursor/, 'which editor the position came from is not actionable');
+  assert.equal(text.split('auth.ts').length - 1, 1, 'the path appears once, not as an absolute and a relative pair');
+  assert.equal(text.split('\n').length, 1, 'one line, not a paragraph');
 });
 
-test('renderContext (zh): a bare cursor is described differently', () => {
+test('renderContext (zh): a caret collapses to a single line number', () => {
   const text = renderContext(
     input({ selection: { startLine: 42, endLine: 42, startColumn: 7, endColumn: 7, isEmpty: true } }),
   );
-  assert.match(text, /把光标停在 src\/auth\.ts 第 42 行/);
-  assert.doesNotMatch(text, /offset=/);
+  assert.equal(text, '[编辑器位置] /w/src/auth.ts 第 42 行');
+});
+
+test('renderContext (zh): a one-line selection reads the same as a caret', () => {
+  const oneLine = renderContext(
+    input({ selection: { startLine: 7, endLine: 7, startColumn: 1, endColumn: 9, isEmpty: false } }),
+  );
+  assert.equal(oneLine, '[编辑器位置] /w/src/auth.ts 第 7 行');
 });
 
 test('renderContext (en) switches language', () => {
-  const text = renderContext(input({ language: 'en' }));
-  assert.match(text, /selected lines 11-14 \(4 lines\)/);
-  assert.match(text, /offset=11, limit=4/);
+  assert.equal(renderContext(input({ language: 'en' })), '[editor position] /w/src/auth.ts lines 11-14');
 });
 
 test('renderContext: an excluded path publishes nothing at all', () => {
   const text = renderContext(input({ relativePath: 'deep/.env', excludeGlobs: ['**/.env'] }));
+  assert.equal(text, '');
+});
+
+test('renderContext: no file open publishes nothing either', () => {
+  // Not prose. A per-turn reader would otherwise announce "no file is open"
+  // every single turn, which is the loudest possible way to say nothing.
+  const text = renderContext(input({ activeFile: '', relativePath: '', selection: null }));
   assert.equal(text, '');
 });
 
@@ -101,6 +113,13 @@ test('buildWindowState: excluded position is scrubbed, not just blanked', () => 
   assert.equal(state.relativePath, '');
   assert.equal(state.selection, null);
   assert.equal(state.appName, 'Cursor', 'window identity survives so the hook can still clear its cache');
+});
+
+test('buildWindowState: no file open is scrubbed the same way', () => {
+  const state = buildWindowState(input({ activeFile: '', relativePath: '', selection: null }));
+  assert.equal(state.context, '');
+  assert.equal(state.sig, '');
+  assert.equal(state.pid, 4242, 'the window still identifies itself, so "the extension is alive" stays readable');
 });
 
 test('buildWindowState: a published position keeps its fields', () => {

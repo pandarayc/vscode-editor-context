@@ -4,199 +4,255 @@
 
 > **[English](README.md) · [中文](README.zh.md)**
 
-Publish which lines you are looking at in Cursor / VS Code, so any agent on the same machine can know.
+Publish the file and line range you are looking at in Cursor / VS Code, so an
+agent running on the same machine can read exactly that range.
 
-One extension, one collector, several consumers: a **state file** (what ships today), a **Claude Code hook**, and — for DSH — a separate plugin that turns the reading into a chip in the composer.
-
-> Why not just emit `@path:11-14`: DSH's `@` mention grammar is **path-only**; line numbers exist only in markdown links (`#L11-L14`). This extension therefore publishes a plain description rather than an `@` token, which DSH would read as a file literally named `src/auth.ts:11-14`.
-
----
-
-## What it does
-
-On every caret move, selection change or file switch, the extension atomically writes the current position to:
+The extension is a producer only. It writes one small JSON file per editor window
+and never talks to an agent:
 
 ```
-~/.editor-context/
-└── windows/
-    └── <extension host pid>.json     # one file per editor window
+~/.editor-context/windows/<extension-host pid>.json
 ```
-
-**Each window writes its own file.** VS Code / Cursor run one extension host per window, so there is no lock to take and no window overwrites another; readers take the newest by mtime.
-
-One window file looks like this:
 
 ```json
 {
   "version": 1,
   "pid": 9931,
   "appName": "Cursor",
-  "updatedAt": "2026-10-14T10:30:33.921Z",
-  "sig": "editor-context/src/core.ts|sel|11-14",
-  "context": "[编辑器位置] 用户当前在 Cursor 里选中了 editor-context/src/core.ts 第 11-14 行（共 4 行）。\n绝对路径：/data/project/dsh-plugin/editor-context/src/core.ts\n需要看内容时用 read 工具读该区间（offset=11, limit=4）。",
-  "workspaceFolders": ["/data/project/dsh-plugin"],
-  "activeFile": "/data/project/dsh-plugin/editor-context/src/core.ts",
-  "relativePath": "editor-context/src/core.ts",
+  "updatedAt": "2026-10-16T10:25:58.977Z",
+  "sig": "src/auth.ts|sel|11-14",
+  "context": "[编辑器位置] /w/src/auth.ts 第 11-14 行",
+  "workspaceFolders": ["/w"],
+  "activeFile": "/w/src/auth.ts",
+  "relativePath": "src/auth.ts",
   "languageId": "typescript",
-  "selection": { "startLine": 11, "endLine": 14, "startColumn": 1, "endColumn": 40, "isEmpty": false }
+  "selection": { "startLine": 11, "endLine": 14, "startColumn": 1, "endColumn": 5, "isEmpty": false }
 }
 ```
 
-- `context` is the **already rendered** injection text. Formatting lives in exactly one place (TypeScript); the hook script assembles nothing, so two authors cannot drift apart in wording.
-- `sig` is the stable identity of a position (file + range + selection-or-caret). A column change is not a change, so moving left and right inside one line does not re-inject.
-- **Selected text is never collected.** This version publishes which lines, not what is on them.
+One file per window, so there is no lock to take and no window overwrites
+another; a reader takes the newest by mtime. `selection` and `activeFile` are the
+structured reading, `context` is the same thing pre-rendered as one line for
+consumers that only want text, and `sig` changes when the position does — which
+is what lets a reader avoid saying the same thing twice.
 
----
+**The ambient file never contains your code.** `windows/<pid>.json` is rewritten
+on every caret move, so it stays an address and nothing else. The selected text
+travels only when you ask for it — an explicit **Add to Bot** — or to a subscriber
+that opted into a continuous feed, and never for a path `excludeGlobs` rejects.
+
+## Subscribers
+
+The extension is a **publisher**. It describes where you are and hands that to
+whoever asked; it does not know what any consumer does with it. There are two
+kinds of subscriber, and the difference is what lands on disk.
+
+**In process.** A sibling extension gets every event with no filesystem at all:
+
+```ts
+const api = vscode.extensions.getExtension('pandarayc.editor-context')?.exports;
+const sub = api.subscribe((delivery) => { /* ... */ });
+```
+
+**Over a socket.** The extension runs a WebSocket publisher on
+`ws://127.0.0.1:7788/editor-context` by default. A subscriber connects, gets a
+`hello`, sends one `subscribe` frame, and then receives a `delivery` per event —
+no filesystem, no polling, and the delivery arrives while you are still holding
+the selection.
+
+```jsonc
+// ← { "type": "hello", "protocol": "editor-context/1", "requiresToken": false, … }
+→ { "type": "subscribe", "name": "dsh", "label": "DSH", "includeText": true, "autoSelection": false }
+// ← { "type": "subscribed", "name": "dsh", "includeText": true, "autoSelection": false }
+// ← { "type": "delivery", "delivery": { … } }
+```
+
+The same two knobs as a manifest, so routing is one function whatever transport a
+subscriber arrived on. **Editor Context: Show WebSocket Address** prints the URL
+and the number of connected subscribers.
+
+A non-loopback `ws.host` is **refused unless `ws.token` is set**; the token is
+checked before the policy is applied, so a client that guessed wrong learns
+nothing about what it would have received.
+
+**On disk.** An agent that cannot dial in registers by writing one manifest — that file is the whole
+protocol, so a new consumer appears without an extension update:
+
+```
+~/.editor-context/
+├── windows/<pid>.json                    where the caret is, always (address only)
+├── requests/<ts>-<pid>-<seq>.json        the public mailbox: explicit sends
+└── subscribers/
+    ├── dsh.json                          the manifest, written by the subscriber
+    └── dsh/inbox/<ts>-<pid>-<seq>.json   targeted deliveries
+```
+
+```json
+{ "label": "DSH", "includeText": true, "autoSelection": false }
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `label` | the file name | How the recipient picker names it |
+| `includeText` | `true` | Whether deliveries carry the selected text. `false` sends the address only |
+| `autoSelection` | `false` | Whether **every changed non-empty selection** is delivered, not only explicit sends |
+
+**Editor Context: Add to Bot** — on the editor title bar, in the right-click menu
+and in the palette — sends the current position to *every* registered subscriber
+and to the public mailbox. **Add to Bot (choose recipient)…** sends to one, and
+that delivery is private: it is not copied to the public mailbox.
+
+The public mailbox exists for consumers that cannot register. A hook script runs
+only when a prompt is sent, so it has nowhere to put a manifest; it just reads
+`requests/`.
+
+### What a subscriber receives
+
+The position fields carry the same names as the ambient file, so a reader that
+already parses `windows/<pid>.json` finds them where it expects:
+
+```json
+{
+  "version": 1,
+  "kind": "editor-context/delivery",
+  "id": "0f0b2c1e-…",
+  "at": "2026-10-17T06:12:00.000Z",
+  "reason": "explicit",
+  "target": "dsh",
+  "activeFile": "/w/src/auth.ts",
+  "relativePath": "src/auth.ts",
+  "languageId": "typescript",
+  "selection": { "startLine": 11, "endLine": 14, "startColumn": 1, "endColumn": 5, "isEmpty": false },
+  "context": "[编辑器位置] /w/src/auth.ts 第 11-14 行",
+  "text": "export function login(user: User) {\n  …",
+  "textTruncated": false
+}
+```
+
+`text` is cut to `editorContext.maxTextBytes` and `textTruncated` says so. A
+selection longer than 5000 lines is not read at all beyond that point.
+
+**`excludeGlobs` produces no delivery, not an empty one.** The rule is about the
+path appearing in a message, so a payload with the address blanked out would
+defeat it.
+
+## Pick your agent
+
+| Agent | Install | Where the position lands |
+|---|---|---|
+| **DSH** | [`dsh-editor-context`](https://github.com/pandarayc/dsh-editor-context) | a chip in the composer — from `@`, or straight from the button — **use this one** |
+| **Claude Code** | the hook below | injected on the next prompt, on a changed position |
+| anything else | nothing | read the JSON |
+
+> **On DSH, skip the hook.** Measured, it appends one durable user message per
+> turn whenever the cursor is moving — a position is a high-cardinality dedup
+> key, so the "only when it changed" cache never fires. The chip exists because
+> of that measurement. The hook is kept for editors that are not driving DSH.
+
+A request is served *before* the ambient reading by every consumer that reads the
+state directory, and exactly once: `windows/` is where the caret is, `requests/` is
+where you pointed.
 
 ## Install
 
-### Option 1: Remote-SSH (Cursor runs on another machine)
+### Remote-SSH — Cursor runs on another machine
 
-A remote window has **no** `cursor` CLI — that lives on the client machine — so the extension must be placed in the **server-side** extension directory. Get the script from a checkout of this repository (it is deliberately not inside the VSIX: the machine that needs it is the one that cannot run `cursor`):
+A remote window has **no** `cursor` CLI: that lives on the client machine. So the
+extension has to be placed in the server-side extension directory, and the script
+that does it ships in this repository rather than in the VSIX — the machine that
+needs it is precisely the one that cannot run `cursor`.
 
 ```bash
-node scripts/install-cursor-remote.mjs --vsix ./editor-context-0.1.0.vsix
+node scripts/install-cursor-remote.mjs --vsix ./editor-context-0.4.0.vsix
 ```
 
-It does the two things the server would otherwise do for you: unpacks the VSIX into `~/.cursor-server/extensions/<publisher>.editor-context-0.1.0/` (renaming `.vsixmanifest` to the dotted form) and writes the entry into `extensions/extensions.json` — **backing it up first**, and idempotently, so re-running replaces the entry instead of appending a duplicate. It probes `~/.cursor-server` and falls back to `~/.vscode-server`; pass `--server <dir>` to be explicit.
+It unpacks the VSIX into `~/.cursor-server/extensions/<publisher>.editor-context-<version>/`
+and adds the entry to `extensions/extensions.json`, backing that file up first and
+replacing an existing entry rather than appending a duplicate. It probes
+`~/.cursor-server` and falls back to `~/.vscode-server`; `--server <dir>` is
+explicit. No restart is needed — the extension host picks it up on its own.
 
-**Measured: no manual restart is needed.** Cursor's extension host activates it on its own, and `~/.editor-context/windows/` shows a file immediately.
-
-### Option 2: A local window (Cursor / VS Code on this machine)
+### A window on this machine
 
 ```bash
-cursor --install-extension editor-context-0.1.0.vsix
+cursor --install-extension editor-context-0.4.0.vsix
 # or: Command Palette → Extensions: Install from VSIX…
 ```
 
 VS Code is the same API: `code --install-extension`.
 
-### Option 3: Development mode
+### Development
 
 ```bash
-cd editor-context
 npm install --cache ../.npm-cache
 npm run compile
 # open this folder in Cursor and press F5 for an Extension Development Host
 ```
 
-Then open any file, select a few lines, and:
+Then open a file, select a few lines, and:
 
 ```bash
 cat ~/.editor-context/windows/*.json
 ```
 
----
-
-## Configuration
+## Settings
 
 | Key | Default | Meaning |
 |---|---|---|
 | `editorContext.enabled` | `true` | Turning it off **deletes** this window's state file |
+| `editorContext.excludeGlobs` | `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `.ssh/**`, `node_modules/**` | A match publishes **nothing at all, not even the path**. A pattern containing `/` matches the workspace-relative path; a bare one matches the file name |
+| `editorContext.language` | `zh` | Language of the `context` line: `zh` / `en` |
+| `editorContext.sendText` | `true` | Include the selected text in deliveries. Never affects the ambient file |
+| `editorContext.maxTextBytes` | `20000` | Byte budget for that text; `0` disables the cap |
+| `editorContext.ws.enabled` | `true` | Run the WebSocket publisher |
+| `editorContext.ws.host` | `127.0.0.1` | Bind address. Non-loopback is refused without a token |
+| `editorContext.ws.port` | `7788` | `0` picks a free port, which changes the address every restart |
+| `editorContext.ws.path` | `/editor-context` | Endpoint path |
+| `editorContext.ws.token` | empty | Shared secret required in the `subscribe` frame |
 | `editorContext.stateDir` | empty → `~/.editor-context` | Move the directory |
-| `editorContext.excludeGlobs` | `.env` / `*.pem` / `*.key` / `id_rsa*` / `id_ed25519*` / `.ssh/**` / `node_modules/**` | A match publishes **nothing at all, not even the path** (this is not about hiding the text). A pattern containing `/` matches the workspace-relative path; a bare pattern matches the file name |
-| `editorContext.language` | `zh` | Language of the rendered text: `zh` / `en` |
-| `editorContext.debounceMs` | `150` | Coalescing window for caret jitter |
+| `editorContext.debounceMs` | `150` | Quiet period before a caret move is written |
 
-Two commands are also registered: `Editor Context: Show State File`, and `Copy Current Position as Context` (puts the description on the clipboard so you can paste it to any agent by hand).
+Five commands are registered: **Add to Bot** and **Add to Bot (choose
+recipient)…** (above), **Show WebSocket Address** (the URL and the subscriber
+count), **Show State File** (opens the file this window is writing), and **Copy
+Current Position as Context** (puts the `context` line on the clipboard).
 
----
+`editorContext.sendToAgent` is still registered as an alias of **Add to Bot**, so
+a keybinding written against 0.2.0 keeps working.
 
-## Connecting to DSH
+## Limitations
 
-> **Read this first if you are using DSH.** There are two ways in, and the hook is the wrong one for DSH.
->
-> The plugin **[`dsh-editor-context`](https://github.com/pandarayc/dsh-editor-context)** reads these state files and offers the position as a chip in the composer — text you type, into your own message.
->
-> The hook below injects automatically on every prompt. Measured on DSH, that **appends one durable user message per turn** whenever the cursor moves often: the dedup key is the exact position, and a high-cardinality dedup key is no dedup at all. It is kept for editors that are not driving DSH.
+- **The hook's change cache may have to live inside your project.** DSH runs
+  hooks in the session's file sandbox, where `~/.editor-context` is readable but
+  not writable, so the cache falls back to `<session cwd>/.dsh/editor-context/`.
+  A `.dsh/` folder appearing in a project is that; add it to `.gitignore`. With
+  nowhere writable at all, the hook injects every turn rather than failing
+  silently.
+- **Whole ranges are not highlighted**, only addressed. Jumping the editor to a
+  range would need an inbound channel, and the extension has none.
+- **With several windows open the most recently updated one wins.** There is no
+  cross-process notion of the focused window.
+- **An unchanged position is not re-injected by the hook**, to save tokens. After
+  a compaction, move the caret to get it back.
 
-The bundled script is idempotent, **backs up** `hooks.json` first, and preserves any `PreToolUse` / `PostToolUse` you already have:
+## Under the hood
 
-```bash
-node scripts/install-dsh-hook.mjs            # add --print to see what it would write
-```
-
-It copies `hooks/editor_context.py` into `~/.dsh/hooks/` and merges a `UserPromptSubmit` entry into `~/.dsh/hooks/hooks.json`:
-
-```json
-{
-  "UserPromptSubmit": [
-    {
-      "hooks": [
-        { "type": "command", "command": "python3 \"$HOME/.dsh/hooks/editor_context.py\"", "timeout": 5 }
-      ]
-    }
-  ]
-}
-```
-
-Doing it by hand is the same two steps: copy the script, merge the object above into `hooks`.
-
-**Then restart dsh-web** — `configPath` is read once at DSH process start (a note in `~/.dsh/profiles/web/cordis.patch.yml` says so).
-
-### Four hard contracts (getting one wrong fails silently)
-
-Taken from the `@deepseek-ai/dsh-hook-protocol` type declarations. The bundled script satisfies all four; do not break them when editing:
-
-| Contract | Why |
-|---|---|
-| `type` must be `command` | `http` / `mcp_tool` / `prompt` / `agent` handlers are skipped with a warning |
-| `hookSpecificOutput.hookEventName` must equal `"UserPromptSubmit"` | On a mismatch the event-domain fields (including `additionalContext`) are **dropped silently** |
-| It must be JSON, not bare stdout | The Claude Code dialect renders bare stdout as *output*, not as context |
-| Write `timeout` explicitly | The bridge defaults to 600 seconds, not Claude Code's 30 |
-
-`UserPromptSubmit` ignores matchers; matching hooks run serially and their context accumulates in hook order.
-
-### Verifying
+`src/core.ts` is pure logic — position model, glob exclusion, rendering, the
+delivery model — with no `vscode` import, so it unit-tests under plain Node.
+`src/state.ts` is the on-disk layout: window files, the public mailbox, the
+subscriber registry and its inboxes. `src/server.ts` is the WebSocket publisher;
+`src/extension.ts` is the event wiring and the fan-out. `hooks/editor_context.py` is a zero-dependency Python 3.8+
+`UserPromptSubmit` hook.
 
 ```bash
-echo '{"session_id":"t1"}' | python3 ~/.dsh/hooks/editor_context.py   # prints JSON when there is a position
-echo '{"session_id":"t1"}' | python3 ~/.dsh/hooks/editor_context.py   # position unchanged → no output (0 bytes)
+npm run compile && npm test    # 59 passed
 ```
 
-`EDITOR_CONTEXT_DIR` overrides the state directory; a reading older than `EDITOR_CONTEXT_MAX_AGE_SECONDS` (default 3600) is treated as stale and not injected.
+For why the rendering is one terse line, why `context: ''` means two different
+things, and the four contracts the hook must not break:
+[docs/internals.md](docs/internals.md). The original survey and design record is
+[docs/design.md](docs/design.md) (Chinese).
 
----
+## License
 
-## Connecting to Claude Code
-
-The same script, dropped into `~/.claude/settings.json` (Claude Code reads that format natively). Note that Claude Code's `UserPromptSubmit` accepts both bare-stdout context and JSON; the JSON form used here works in both places.
-
----
-
-## Why a hook, and not just MCP
-
-MCP is a **pull** interface: the model gets data when it calls a tool, and it cannot push "you are looking at line 12" into the prompt. Claude Code's own IDE integration is split the same way — its IDE server exposes only two tools to the model, and selection sharing goes through harness-side context injection.
-
-So the division is:
-
-| Face | Covers | Status |
-|---|---|---|
-| State file + hook | automatic knowledge every turn (the model need not ask) | ✅ this version |
-| MCP server | the model asking "what am I looking at", and making the IDE jump to a line | not built |
-
-The `dsh-hook-protocol` guidance makes the same point from the other side: if you are only serving DSH, a **native Cordis plugin** is cleaner than going through the hook bridge, because you get the full harness API. The hook face is chosen here so that **one script serves Claude Code, DSH and Cursor alike** — and for DSH specifically, `dsh-editor-context` is the native plugin.
-
----
-
-## Layout
-
-```
-src/core.ts         pure logic: position model, glob exclusion, rendering (no vscode import, unit-testable)
-src/state.ts        atomic write of windows/<pid>.json
-src/extension.ts    VS Code event wiring
-hooks/editor_context.py   UserPromptSubmit hook (zero-dependency Python 3.8+)
-test/core.test.mjs        10 pure-logic cases
-test/hook.test.mjs        11 hook end-to-end cases
-```
-
-```bash
-npm run compile && npm test    # 21 passed
-```
-
-## Known limitations
-
-- **The hook's "only when it changed" cache may have to live in your workspace.** Hooks are launched by DSH's `ShellExecutor` (`@deepseek-ai/dsh-shell`) and inherit the session's file sandbox: `~/.editor-context` is **readable but not writable**. The dedup cache therefore tries locations in order — the state directory first, then `<session cwd>/.dsh/editor-context/<session>.sig`. A `.dsh/editor-context/` appearing in your project is that; add it to `.gitignore`. With nowhere writable it falls back to injecting every turn rather than failing silently.
-- **Single-line jumps only.** Highlighting a whole 12-15 range is not attempted here: DSH's `#L` fragment itself carries one line (`WorkspaceFileParams.line`). Range highlighting would need the IDE side to do it.
-- **Injects only on change.** An unchanged position is not re-injected, to save tokens. The side effect: after a compaction, if the position has not moved, that description may no longer be in context. Move the caret to get it back.
-- **With several windows, the most recently updated one wins.** There is no cross-process notion of "the active window".
+MIT

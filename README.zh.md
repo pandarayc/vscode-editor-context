@@ -1,199 +1,229 @@
 # editor-context
+
+<img src="icon.png" width="96" alt="">
+
 > **[English](README.md) · [中文](README.zh.md)**
 
-把「你在 Cursor / VS Code 里正看着哪几行」发布出去，让任意 agent 都能知道。
+把「你在 Cursor / VS Code 里正看着哪几行」发布出去，让同机运行的 agent 能读到那一段。
 
-一个扩展，一个采集源，多个消费者：**状态文件**（当前这一版的全部内容）、一个 **Claude Code hook**，以及 —— 对 DSH 而言 —— 一个独立的插件，把读数变成输入框里的一张 chip。
-
-> 为什么不是 `@path:11-14`：DSH 的 `@` 提及**只认路径**，行号只存在于 markdown 链接的 `#L11-L14` 片段。本扩展产出的是**给模型看的自然语言描述**，不产出 `@` 记号——那种写法在 DSH 里会被当成一个叫 `src/auth.ts:11-14` 的文件。
-
----
-
-## 它做什么
-
-光标一动、选区一变、切文件，扩展就把当前位置原子地写进：
+扩展只负责生产：每个编辑器窗口写一个小 JSON 文件，从不与 agent 通信。
 
 ```
-~/.editor-context/
-└── windows/
-    └── <扩展宿主 pid>.json     # 每个编辑器窗口一个文件
+~/.editor-context/windows/<扩展宿主 pid>.json
 ```
-
-**每个窗口写自己的文件**——VS Code/Cursor 每个窗口一个扩展宿主进程，所以不需要锁，也不会互相覆盖；读取方按 mtime 取最新。
-
-单个窗口文件长这样：
 
 ```json
 {
   "version": 1,
   "pid": 9931,
   "appName": "Cursor",
-  "updatedAt": "2026-10-14T10:30:33.921Z",
-  "sig": "editor-context/src/core.ts|sel|11-14",
-  "context": "[编辑器位置] 用户当前在 Cursor 里选中了 editor-context/src/core.ts 第 11-14 行（共 4 行）。\n绝对路径：/data/project/dsh-plugin/editor-context/src/core.ts\n需要看内容时用 read 工具读该区间（offset=11, limit=4）。",
-  "workspaceFolders": ["/data/project/dsh-plugin"],
-  "activeFile": "/data/project/dsh-plugin/editor-context/src/core.ts",
-  "relativePath": "editor-context/src/core.ts",
+  "updatedAt": "2026-10-16T10:25:58.977Z",
+  "sig": "src/auth.ts|sel|11-14",
+  "context": "[编辑器位置] /w/src/auth.ts 第 11-14 行",
+  "workspaceFolders": ["/w"],
+  "activeFile": "/w/src/auth.ts",
+  "relativePath": "src/auth.ts",
   "languageId": "typescript",
-  "selection": { "startLine": 11, "endLine": 14, "startColumn": 1, "endColumn": 40, "isEmpty": false }
+  "selection": { "startLine": 11, "endLine": 14, "startColumn": 1, "endColumn": 5, "isEmpty": false }
 }
 ```
 
-- `context` 是**已经渲染好**的注入文本——格式化逻辑只有一份（在 TypeScript 里），hook 脚本不做拼装，避免两处措辞漂移。
-- `sig` 是位置的稳定签名（文件 + 行范围 + 是选区还是光标）。列号变化不算变化，所以同一行里左右移动光标不会反复注入。
-- **不采集选中文本**。当前版本只发布「哪个文件的哪几行」。
+一个窗口一个文件：不需要锁，也不会互相覆盖；读取方按 mtime 取最新。`selection`
+和 `activeFile` 是结构化的读数，`context` 是同一件事预先渲染成的一行文本（给只想
+直接拿去用的消费者），`sig` 在位置变化时才变——读取方靠它避免把同一句话说两遍。
 
----
+**环境态文件里绝不含你的代码。** `windows/<pid>.json` 每次光标移动都会重写，所以它
+始终只是一个地址。选中文本只在两种情况下离开编辑器：你显式点了 **Add to Bot**，或者
+某个订阅者主动订阅了连续流；被 `excludeGlobs` 排除的路径永远不会。
+
+## 订阅者
+
+这个扩展是一个**发布者**：它描述你在哪，然后交给要它的人；它不知道任何消费者拿它做
+什么。订阅者有两类，区别在于**什么会落到磁盘上**。
+
+**进程内。** 兄弟扩展不需要任何文件系统，就能拿到每一次事件：
+
+```ts
+const api = vscode.extensions.getExtension('pandarayc.editor-context')?.exports;
+const sub = api.subscribe((delivery) => { /* ... */ });
+```
+
+**走 socket。** 扩展默认在 `ws://127.0.0.1:7788/editor-context` 上跑一个 WebSocket
+发布端。订阅者连上来，收到 `hello`，发一帧 `subscribe`，之后每次事件都会收到一帧
+`delivery`——不用文件系统、不用轮询，而且投递到的时候你手还按在选区上。
+
+```jsonc
+// ← { "type": "hello", "protocol": "editor-context/1", "requiresToken": false, … }
+→ { "type": "subscribe", "name": "dsh", "label": "DSH", "includeText": true, "autoSelection": false }
+// ← { "type": "subscribed", "name": "dsh", "includeText": true, "autoSelection": false }
+// ← { "type": "delivery", "delivery": { … } }
+```
+
+两个开关和 manifest 完全一致，所以不管订阅者从哪种传输进来，路由都是同一个函数。
+**Editor Context: Show WebSocket Address** 会打印 URL 和已连接订阅者数量。
+
+`ws.host` 非本机时**必须**设置 `ws.token`，否则拒绝启动；token 在应用策略**之前**
+校验，所以猜错的客户端什么也学不到。
+
+**磁盘上。** 连不进来的 agent 写一个 manifest 就完成了注册——这个文件就是全部协议，所以新的消费
+者出现不需要更新扩展：
+
+```
+~/.editor-context/
+├── windows/<pid>.json                    光标在哪，一直写（只有地址）
+├── requests/<ts>-<pid>-<seq>.json        公开信箱：显式发送
+└── subscribers/
+    ├── dsh.json                          订阅者自己写的 manifest
+    └── dsh/inbox/<ts>-<pid>-<seq>.json   定向投递
+```
+
+```json
+{ "label": "DSH", "includeText": true, "autoSelection": false }
+```
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `label` | 文件名 | 选择器里显示的名字 |
+| `includeText` | `true` | 投递是否带选中文本。`false` 只发地址 |
+| `autoSelection` | `false` | 是否连**每一次变化的非空选区**都投递，而不只是显式发送 |
+
+**Editor Context: Add to Bot**（编辑器标题栏、右键菜单、命令面板）把当前位置发给**所有**
+已注册订阅者，并写入公开信箱。**Add to Bot (choose recipient)…** 只发给其中一个，而且
+那一份是**私密的**：不会抄送到公开信箱。
+
+公开信箱是给无法注册的消费者准备的。hook 脚本只在发消息时运行，没地方放 manifest，
+它直接读 `requests/` 就行。
+
+### 订阅者收到什么
+
+位置相关字段与那个环境态文件**同名**，所以已经在解析 `windows/<pid>.json` 的读取端能
+在预期的地方找到它们：
+
+```json
+{
+  "version": 1,
+  "kind": "editor-context/delivery",
+  "id": "0f0b2c1e-…",
+  "at": "2026-10-17T06:12:00.000Z",
+  "reason": "explicit",
+  "target": "dsh",
+  "activeFile": "/w/src/auth.ts",
+  "relativePath": "src/auth.ts",
+  "languageId": "typescript",
+  "selection": { "startLine": 11, "endLine": 14, "startColumn": 1, "endColumn": 5, "isEmpty": false },
+  "context": "[编辑器位置] /w/src/auth.ts 第 11-14 行",
+  "text": "export function login(user: User) {\n  …",
+  "textTruncated": false
+}
+```
+
+`text` 会被 `editorContext.maxTextBytes` 截断，`textTruncated` 会说明。超过 5000 行的
+选区不会继续往下读。
+
+**`excludeGlobs` 命中时是「不产生投递」，不是「产生一条空的」。** 这条规则管的是路径
+有没有出现在消息里，所以一条把地址抹掉的载荷等于没守规矩。
+
+## 先选你的 agent
+
+| Agent | 装什么 | 位置以什么形式到达 |
+|---|---|---|
+| **DSH** | [`dsh-editor-context`](https://github.com/pandarayc/dsh-editor-context) | 输入框里的一张 chip —— 从 `@` 选，或者直接用按钮 —— **用这个** |
+| **Claude Code** | 下面的 hook | 位置变化时自动注入 |
+| 其他 | 什么都不用装 | 直接读 JSON |
+
+> **用 DSH 就别装 hook。** 实测：光标动得多时它每回合追加一条 durable user 消息
+> ——位置是高基数去重键，「变了才注入」的去重实际上从不命中。chip 就是这次实测的
+> 产物。hook 保留给不接 DSH 的编辑器。
 
 ## 安装
 
-### 方式一：Remote-SSH / 远端（Cursor 跑在另一台机器上）
+### Remote-SSH：Cursor 跑在另一台机器上
 
-远端窗口里**没有** `cursor` CLI（CLI 在客户端那台机器上），所以扩展必须装进**服务器侧**的扩展目录。脚本要从本仓库取（它**故意不放进 VSIX**：需要它的那台机器恰恰是跑不了 `cursor` 的那台）：
+远端窗口里**没有** `cursor` CLI（CLI 在客户端那台机器上），所以扩展必须装进
+**服务器侧**的扩展目录。做这件事的脚本放在本仓库里而不是 VSIX 里——需要它的那台
+机器，恰恰是跑不了 `cursor` 的那台。
 
 ```bash
-node scripts/install-cursor-remote.mjs --vsix ./editor-context-0.1.0.vsix
+node scripts/install-cursor-remote.mjs --vsix ./editor-context-0.4.0.vsix
 ```
 
-它做两件服务端本来会做的事：把 VSIX 解到 `~/.cursor-server/extensions/local.editor-context-0.1.0/`（`.vsixmanifest` 改名成点号形式），并把条目写进 `extensions/extensions.json`（**会先备份**，且幂等——重跑会替换旧条目而不是追加）。默认探测 `~/.cursor-server`，没有就退到 `~/.vscode-server`；用 `--server <dir>` 显式指定。
+它把 VSIX 解到 `~/.cursor-server/extensions/<publisher>.editor-context-<version>/`，
+再把条目写进 `extensions/extensions.json`——**会先备份**，而且幂等（重跑替换旧条目，
+不追加重复）。默认探测 `~/.cursor-server`，没有就退到 `~/.vscode-server`；用
+`--server <dir>` 显式指定。**装完不用重启**，扩展宿主会自己激活它。
 
-**实测：装完不需要手动重启**——Cursor 的扩展宿主会自己激活它，`~/.editor-context/windows/` 立刻出现文件。
-
-### 方式二：本机窗口（Cursor / VS Code 就装在这台机器上）
+### 本机窗口
 
 ```bash
-cursor --install-extension editor-context-0.1.0.vsix
-# 或用命令面板：Extensions: Install from VSIX…
+cursor --install-extension editor-context-0.4.0.vsix
+# 或命令面板：Extensions: Install from VSIX…
 ```
 
-VS Code 同理，`code --install-extension` 即可（两边是同一套扩展 API）。
+VS Code 同理：`code --install-extension`。
 
-### 方式三：开发模式
+### 开发模式
 
 ```bash
-cd editor-context
 npm install --cache ../.npm-cache
 npm run compile
 # 用 Cursor 打开本目录，按 F5 起 Extension Development Host
 ```
 
-装完打开任意文件、划选几行，然后：
+然后打开一个文件、划选几行：
 
 ```bash
 cat ~/.editor-context/windows/*.json
 ```
-
----
 
 ## 配置
 
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `editorContext.enabled` | `true` | 关掉会**删除**本窗口的状态文件 |
+| `editorContext.excludeGlobs` | `.env` / `.env.*` / `*.pem` / `*.key` / `id_rsa*` / `id_ed25519*` / `.ssh/**` / `node_modules/**` | **命中就连路径都不发布**，不只是隐去文本。含 `/` 的模式匹配工作区相对路径，不含 `/` 的匹配文件名 |
+| `editorContext.language` | `zh` | `context` 那一行的语言：`zh` / `en` |
+| `editorContext.sendText` | `true` | 投递是否包含选中文本。**不影响**环境态文件 |
+| `editorContext.maxTextBytes` | `20000` | 该文本的字节预算；`0` 表示不限制 |
+| `editorContext.ws.enabled` | `true` | 是否运行 WebSocket 发布端 |
+| `editorContext.ws.host` | `127.0.0.1` | 绑定地址。非本机时没有 token 会被拒绝 |
+| `editorContext.ws.port` | `7788` | `0` 表示自动选端口，地址每次重启都会变 |
+| `editorContext.ws.path` | `/editor-context` | 端点路径 |
+| `editorContext.ws.token` | 空 | `subscribe` 帧必须携带的共享密钥 |
 | `editorContext.stateDir` | 空 → `~/.editor-context` | 换目录 |
-| `editorContext.excludeGlobs` | `.env` / `*.pem` / `*.key` / `id_rsa*` / `id_ed25519*` / `.ssh/**` / `node_modules/**` | **命中就连路径都不发布**（不只是隐去文本）。含 `/` 的模式匹配工作区相对路径，不含 `/` 的匹配文件名 |
-| `editorContext.language` | `zh` | 注入文本语言，`zh` / `en` |
-| `editorContext.debounceMs` | `150` | 光标抖动的合并窗口 |
+| `editorContext.debounceMs` | `150` | 光标移动写盘前的静默窗口 |
 
-命令面板里还有 `Editor Context: Show State File` 和 `Copy Current Position as Context`（后者把描述文本拷进剪贴板，可手动粘给任何 agent）。
+命令面板里有四条命令：**Add to Bot** 和 **Add to Bot (choose recipient)…**（见上）、
+**Show State File**（打开本窗口正在写的文件）、**Copy Current Position as Context**
+（把 `context` 那行拷进剪贴板）。
 
----
-
-## 接到 DSH
-
-> **用 DSH 的话先读这段。** 进 DSH 有两条路，而 hook 是错的那条。
->
-> 插件 **[`dsh-editor-context`](https://github.com/pandarayc/dsh-editor-context)** 读这些状态文件，把位置作为 chip 提供在输入框里 —— 是你打的字，进你自己的消息。
->
-> 下面的 hook 每个 prompt 自动注入。在 DSH 上实测：光标动得多时它**每回合追加一条 durable user 消息** —— 去重键是精确位置，而高基数去重键等于没有去重。保留它，是为了服务那些不接 DSH 的编辑器。
-
-用带上的脚本（幂等，**会先备份** `hooks.json`，并且保留你已有的 `PreToolUse` / `PostToolUse`）：
-
-```bash
-node scripts/install-dsh-hook.mjs            # 先看会写什么：加 --print
-```
-
-它把 `hooks/editor_context.py` 复制进 `~/.dsh/hooks/`，并在 `~/.dsh/hooks/hooks.json` 里合并一条 `UserPromptSubmit`：
-
-```json
-{
-  "UserPromptSubmit": [
-    {
-      "hooks": [
-        { "type": "command", "command": "python3 \"$HOME/.dsh/hooks/editor_context.py\"", "timeout": 5 }
-      ]
-    }
-  ]
-}
-```
-
-手动做也一样：把脚本复制过去，再把上面这段合并进 `hooks` 对象即可。
-
-**然后必须重启 dsh-web** —— `configPath` 在 DSH 进程启动时只读一次（`~/.dsh/profiles/web/cordis.patch.yml` 里已有这条备注）。
-
-### 四条硬契约（写错会静默失效）
-
-来自 `@deepseek-ai/dsh-hook-protocol` 的类型声明，本脚本已全部满足，改动时别踩：
-
-| 契约 | 说明 |
-|---|---|
-| `type` 必须是 `command` | `http` / `mcp_tool` / `prompt` / `agent` 处理器会被跳过并警告 |
-| `hookSpecificOutput.hookEventName` 必须等于 `"UserPromptSubmit"` | **不匹配时事件域字段（含 `additionalContext`）被静默丢弃** |
-| 必须是 JSON，不能靠纯 stdout | Claude Code 方言把纯 stdout 当「输出」渲染，不当上下文 |
-| 显式写 `timeout` | 桥接默认 600 秒，不是 Claude Code 的 30 秒 |
-
-`UserPromptSubmit` 忽略 matcher；匹配到的 hook 串行执行，上下文按 hook 顺序累加。
-
-### 验证
-
-```bash
-echo '{"session_id":"t1"}' | python3 ~/.dsh/hooks/editor_context.py   # 有位置时打印 JSON
-echo '{"session_id":"t1"}' | python3 ~/.dsh/hooks/editor_context.py   # 位置没变 → 无输出（0 字节）
-```
-
-`EDITOR_CONTEXT_DIR` 可覆盖状态目录；`EDITOR_CONTEXT_MAX_AGE_SECONDS`（默认 3600）之后的状态视为过期、不注入。
-
----
-
-## 接到 Claude Code
-
-同一份脚本，放进 `~/.claude/settings.json` 即可（Claude Code 原生认这个格式）。注意 Claude Code 的 `UserPromptSubmit` 支持纯 stdout 上下文与 JSON 两种，本脚本用的 JSON 形式两边都认。
-
----
-
-## 为什么是 hook，不是只做 MCP
-
-MCP 是**拉取式**的：模型调用工具才拿到数据，它无法把「你正在看第 12 行」推进 prompt。Claude Code 官方的 IDE 集成就是这么切的——它的 IDE server 只把 2 个工具暴露给模型，选区共享走的是 harness 侧的上下文注入。
-
-所以分工是：
-
-| 面 | 覆盖 | 状态 |
-|---|---|---|
-| 状态文件 + hook | 每轮自动知道（模型不用问） | ✅ 本版本 |
-| MCP server | 模型主动查「我在看什么」、让 IDE 跳到某行 | 🚧 规划中 |
-
-`dsh-hook-protocol` 的官方指引也提醒过：若只服务 DSH，**原生 Cordis 插件**比走 hook 桥接更干净（有完整 harness API）。这里选 hook 面，是为了**同一份脚本能同时接 Claude Code / DSH / Cursor**。
-
----
-
-## 目录
-
-```
-src/core.ts        纯逻辑：位置模型、glob 排除、渲染（无 vscode 依赖，可单测）
-src/state.ts       原子写 windows/<pid>.json
-src/extension.ts   VS Code 事件接线
-hooks/editor_context.py   UserPromptSubmit hook（零依赖 Python 3.8+）
-test/core.test.mjs        10 个纯逻辑用例
-test/hook.test.mjs        11 个 hook 端到端用例
-```
-
-```bash
-npm run compile && npm test    # 21 passed
-```
+`editorContext.sendToAgent` 仍注册为 **Add to Bot** 的别名，所以在 0.2.0 上写的快捷键
+不会失效。
 
 ## 已知限制
 
-- **hook 的「变了才注入」缓存可能需要落进你的工作区。** hooks 由 DSH 的 `ShellExecutor`（`@deepseek-ai/dsh-shell`）起进程，会继承会话的文件沙箱——`~/.editor-context` **可读但不可写**。去重缓存因此按顺序找位置：先试状态目录，失败就退到 `<会话cwd>/.dsh/editor-context/<session>.sig`。项目里多出 `.dsh/editor-context/` 就是它，可加进 `.gitignore`。两处都写不进去时，hook 退回「每轮都注入」而不是静默失效。
-- **只跳单行**：这里不做「高亮 12-15 整段」——DSH 的 `#L` 片段本身也只承载单行（`WorkspaceFileParams.line`）。要区间高亮得靠 IDE 侧自己的能力。
-- **变化才注入**：位置没变就不重复注入（省 token）。副作用是压缩（compact）之后若位置一直没动，那行描述可能不在上下文里了——动一下光标即可重新注入。
-- 多窗口时取**最近更新**的那个窗口；没有「哪个窗口是活动窗口」的跨进程判定。
+- **hook 的「变了才注入」缓存可能需要落进你的项目里。** DSH 在会话的文件沙箱里跑
+  hook，`~/.editor-context` **可读但不可写**，所以缓存退到
+  `<会话 cwd>/.dsh/editor-context/`。项目里多出 `.dsh/` 就是它，建议加进
+  `.gitignore`。两处都写不进去时，hook 退回「每轮都注入」而不是静默失效。
+- **只做寻址，不做整段高亮。** 让编辑器跳到某个区间需要一条入站通道，扩展没有。
+- **多窗口时取最近更新的那个。** 没有「哪个窗口是焦点窗口」的跨进程判定。
+- **位置没变时 hook 不重复注入**（省 token）。压缩（compact）之后位置若一直没动，
+  那行描述可能已经不在上下文里了——动一下光标即可。
+
+## 内部细节
+
+`src/core.ts` 是纯逻辑——位置模型、glob 排除、渲染——不 import `vscode`，所以能在
+裸 Node 下单测。`src/state.ts` 负责原子写，`src/extension.ts` 是事件接线，
+`hooks/editor_context.py` 是零依赖的 Python 3.8+ `UserPromptSubmit` hook。
+
+```bash
+npm run compile && npm test    # 59 passed
+```
+
+关于「为什么渲染只有一行」「为什么 `context: ''` 同时表示两件事」，以及 hook 不能
+踩的四条契约：[docs/internals.md](docs/internals.md)。最初的调研与设计记录在
+[docs/design.md](docs/design.md)。
+
+## License
+
+MIT

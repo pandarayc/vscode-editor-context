@@ -36,6 +36,7 @@ import time
 
 EVENT_NAME = "UserPromptSubmit"
 DEFAULT_MAX_AGE_SECONDS = 3600.0
+MAX_CONSUMED_REQUESTS = 32
 
 
 def state_dir() -> str:
@@ -45,11 +46,11 @@ def state_dir() -> str:
     return os.path.join(os.path.expanduser("~"), ".editor-context")
 
 
-def newest_state(directory: str) -> tuple[str, float]:
-    """Return the most recently modified window state file, or ('', -1)."""
+def newest_in(leaf: str) -> tuple[str, float]:
+    """Return the most recently modified JSON document in one leaf directory."""
     best_path = ""
     best_mtime = -1.0
-    for path in glob.glob(os.path.join(directory, "windows", "*.json")):
+    for path in glob.glob(os.path.join(leaf, "*.json")):
         try:
             mtime = os.path.getmtime(path)
         except OSError:
@@ -90,6 +91,46 @@ def read_text(path: str) -> str:
         return ""
 
 
+def load(path: str) -> dict:
+    """Parse one published document, or {} when it is not usable."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            state = json.load(handle)
+    except Exception:
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def parse_cache(text: str) -> tuple[str, list[str]]:
+    """Read the change cache: the last ambient signature, and consumed requests.
+
+    One slot is not enough. An explicit request and the ambient reading are two
+    different documents, so remembering only the most recent signature makes them
+    take turns being "new" and the hook injects both forever.
+
+    A bare value is a pre-0.2 cache, which held one signature.
+    """
+    last_sig = ""
+    consumed: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("sig="):
+            last_sig = line[4:]
+        elif line.startswith("req="):
+            consumed.append(line[4:])
+        elif line and last_sig == "":
+            last_sig = line
+    return last_sig, consumed
+
+
+def render_cache(last_sig: str, consumed: list[str]) -> str:
+    """Serialize the cache, keeping consumed request names bounded."""
+    lines = ["sig={}".format(last_sig)] if last_sig else []
+    for name in consumed[-MAX_CONSUMED_REQUESTS:]:
+        lines.append("req={}".format(name))
+    return "\n".join(lines) + "\n"
+
+
 def main() -> None:
     try:
         raw = sys.stdin.read()
@@ -111,38 +152,64 @@ def main() -> None:
     except ValueError:
         max_age = DEFAULT_MAX_AGE_SECONDS
 
-    path, mtime = newest_state(directory)
-    if not path or (max_age >= 0 and time.time() - mtime > max_age):
-        return
-
-    try:
-        with open(path, encoding="utf-8") as handle:
-            state = json.load(handle)
-    except Exception:
-        return
-    if not isinstance(state, dict):
-        return
-
-    signature = str(state.get("sig") or "")
-    context = str(state.get("context") or "").strip()
-
     session_id = str(payload.get("session_id") or payload.get("sessionId") or "default")
     candidates = cache_candidates(directory, session_id, cwd)
-    if signature != "" and any(read_text(candidate).strip() == signature for candidate in candidates):
+    last_sig = ""
+    consumed: list[str] = []
+    for candidate in candidates:
+        text = read_text(candidate)
+        if text.strip():
+            last_sig, consumed = parse_cache(text)
+            break
+
+    def fresh(mtime: float) -> bool:
+        return max_age < 0 or time.time() - mtime <= max_age
+
+    def wanted(path: str, mtime: float, is_request: bool) -> bool:
+        """Whether this document has something new to say."""
+        if not path or not fresh(mtime):
+            return False
+        state = load(path)
+        if str(state.get("context") or "").strip() == "":
+            # The editor's "publish nothing": an excluded path, or no file open.
+            return False
+        if is_request:
+            # A request is one-shot, tracked by file name so it stays consumed
+            # even after the ambient reading has been injected in between.
+            return os.path.basename(path) not in consumed
+        signature = str(state.get("sig") or "")
+        return signature == "" or signature != last_sig
+
+    # `windows/` is where the caret is; `requests/` is where the user pointed.
+    # Same schema, different intent, and the deliberate act is served first.
+    chosen = ""
+    is_request = False
+    for leaf in ("requests", "windows"):
+        path, mtime = newest_in(os.path.join(directory, leaf))
+        wanted_request = leaf == "requests"
+        if wanted(path, mtime, wanted_request):
+            chosen, is_request = path, wanted_request
+            break
+    if chosen == "":
         return
 
-    if signature != "":
-        for candidate in candidates:
-            try:
-                os.makedirs(os.path.dirname(candidate), exist_ok=True)
-                with open(candidate, "w", encoding="utf-8") as handle:
-                    handle.write(signature)
-                break
-            except OSError:
-                continue
+    state = load(chosen)
+    context = str(state.get("context") or "").strip()
 
-    if context == "":
-        return
+    if is_request:
+        consumed.append(os.path.basename(chosen))
+    else:
+        last_sig = str(state.get("sig") or "")
+
+    cache_text = render_cache(last_sig, consumed)
+    for candidate in candidates:
+        try:
+            os.makedirs(os.path.dirname(candidate), exist_ok=True)
+            with open(candidate, "w", encoding="utf-8") as handle:
+                handle.write(cache_text)
+            break
+        except OSError:
+            continue
 
     sys.stdout.write(
         json.dumps(

@@ -133,61 +133,59 @@ export function signatureOf(input: Pick<PositionInput, 'relativePath' | 'selecti
   return `${relativePath}|${kind}|${selection.startLine}-${selection.endLine}`;
 }
 
-function renderZh(input: PositionInput): string {
-  const { relativePath, activeFile, appName, selection } = input;
-  if (relativePath === '') {
-    return `[编辑器位置] 用户当前在 ${appName} 中没有打开任何文件。`;
-  }
-  if (selection === null) {
-    return `[编辑器位置] 用户当前在 ${appName} 里查看 ${relativePath}。\n绝对路径：${activeFile}`;
-  }
-  if (selection.isEmpty) {
-    return (
-      `[编辑器位置] 用户当前在 ${appName} 里把光标停在 ${relativePath} 第 ${selection.startLine} 行。\n` +
-      `绝对路径：${activeFile}`
-    );
-  }
-  const span = selection.endLine - selection.startLine + 1;
-  return (
-    `[编辑器位置] 用户当前在 ${appName} 里选中了 ${relativePath} 第 ${selection.startLine}-${selection.endLine} 行（共 ${span} 行）。\n` +
-    `绝对路径：${activeFile}\n` +
-    `需要看内容时用 read 工具读该区间（offset=${selection.startLine}, limit=${span}）。`
-  );
-}
+/** The two languages differ only in the tag and in how a range is spelled. */
+const LABELS: Record<ContextLanguage, { tag: string; line: (from: number, to?: number) => string }> = {
+  zh: {
+    tag: '[编辑器位置]',
+    line: (from, to) => (to === undefined ? `第 ${from} 行` : `第 ${from}-${to} 行`),
+  },
+  en: {
+    tag: '[editor position]',
+    line: (from, to) => (to === undefined ? `line ${from}` : `lines ${from}-${to}`),
+  },
+};
 
-function renderEn(input: PositionInput): string {
-  const { relativePath, activeFile, appName, selection } = input;
-  if (relativePath === '') {
-    return `[editor position] The user has no file open in ${appName}.`;
-  }
-  if (selection === null) {
-    return `[editor position] The user is looking at ${relativePath} in ${appName}.\nAbsolute path: ${activeFile}`;
-  }
-  if (selection.isEmpty) {
-    return (
-      `[editor position] The user's caret is on line ${selection.startLine} of ${relativePath} in ${appName}.\n` +
-      `Absolute path: ${activeFile}`
-    );
-  }
-  const span = selection.endLine - selection.startLine + 1;
-  return (
-    `[editor position] The user selected lines ${selection.startLine}-${selection.endLine} (${span} lines) of ${relativePath} in ${appName}.\n` +
-    `Absolute path: ${activeFile}\n` +
-    `Read that range with offset=${selection.startLine}, limit=${span} when its contents matter.`
-  );
+/**
+ * Render the position as a single address line.
+ *
+ * Deliberately terse. The reader is a model that already knows how to open a
+ * path and how to count, so everything derivable from the address is left out
+ * rather than spelled out: the span in lines, the `offset`/`limit` to hand to
+ * `read`, the workspace-relative spelling of a path it was just given
+ * absolutely, and which editor the position came from — a reader has no use for
+ * the last one, because it acts on the path either way.
+ *
+ * @param input - the position.
+ * @returns one line, or `''` when there is nothing to point at.
+ */
+function render(input: PositionInput): string {
+  const { activeFile, relativePath, selection } = input;
+  if (relativePath === '') return '';
+  const { tag, line } = LABELS[input.language];
+  const where = activeFile !== '' ? activeFile : relativePath;
+  if (selection === null) return `${tag} ${where}`;
+  // A caret and a one-line selection address the same thing, so they read alike.
+  const to = selection.endLine === selection.startLine ? undefined : selection.endLine;
+  return `${tag} ${where} ${line(selection.startLine, to)}`;
 }
 
 /**
- * Render the text the hook injects, or the empty string when nothing may be
- * published (excluded path).
+ * Render the text the hook injects.
+ *
+ * The empty string means "publish nothing", and it is the only such signal on
+ * the wire — the reader uses it as the exclusion flag as well. Two cases produce
+ * it: a path an exclude glob rejects, and no file open at all. The second one is
+ * not a detail: a reading with nothing to say must not narrate that fact, or a
+ * hook that fires every turn announces "no file is open" every turn.
+ *
  * @param input - the position.
- * @returns model-facing context text.
+ * @returns model-facing context text, or `''`.
  */
 export function renderContext(input: PositionInput): string {
   if (input.relativePath !== '' && isExcluded(input.relativePath, input.excludeGlobs)) {
     return '';
   }
-  return input.language === 'en' ? renderEn(input) : renderZh(input);
+  return render(input);
 }
 
 /**
@@ -210,4 +208,228 @@ export function buildWindowState(input: PositionInput): WindowState {
     languageId: context === '' ? '' : input.languageId,
     selection: context === '' ? null : input.selection,
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Deliveries: what a subscriber receives                                     */
+/* -------------------------------------------------------------------------- */
+
+/** Why a delivery was produced. */
+export type DeliveryReason = 'change' | 'explicit';
+
+/** Discriminator so a consumer can tell a delivery from an ambient state file. */
+export const DELIVERY_KIND = 'editor-context/delivery';
+
+/**
+ * What one subscriber asked to receive.
+ *
+ * Every transport declares the same two knobs — over the filesystem in a
+ * manifest, or over a socket in a `subscribe` frame — so routing is one function
+ * regardless of how the subscriber arrived.
+ */
+export interface SubscriptionPolicy {
+  /** Stable identity, used as the target of a named send. */
+  name: string;
+  /** How the recipient picker names it. */
+  label: string;
+  /** Wants the selected text, not only the address. */
+  includeText: boolean;
+  /** Wants every changed selection, not only explicit sends. */
+  autoSelection: boolean;
+}
+
+/**
+ * A subscriber registered on disk.
+ *
+ * Written by the *subscriber*, never by this extension: a file under
+ * `subscribers/<name>.json` is the whole registration protocol. That keeps the
+ * producer side free of a list of agents it would otherwise have to know about,
+ * and lets a new consumer appear without an extension update.
+ */
+export interface SubscriberManifest extends SubscriptionPolicy {}
+
+/** Position fields plus the delivery envelope and its text policy. */
+export interface DeliveryInput extends PositionInput {
+  id: string;
+  reason: DeliveryReason;
+  /** Subscriber name for a targeted send, `null` for the public mailbox. */
+  target: string | null;
+  /** The buffer text inside the selection, as read by the caller. */
+  selectedText: string;
+  includeText: boolean;
+  maxTextBytes: number;
+}
+
+/**
+ * One message to one subscriber.
+ *
+ * A delivery is a **snapshot, not a pointer**. The text travels with the address
+ * on purpose: a pointer goes stale the moment the file is edited, moved,
+ * reverted or deleted, and the agent is then reasoning about code that no longer
+ * exists. Shipping the text means the reader still has what the user was looking
+ * at, and shipping the range means it also knows where that was — enough to
+ * render a chip, and enough to tell how the two have since diverged.
+ *
+ * `address` is the rendered one-liner. It is deliberately not called `context`:
+ * the ambient `WindowState` uses that name for its hook-facing text, and one key
+ * meaning two things across two documents is how parsers go wrong.
+ */
+export interface Delivery {
+  version: 1;
+  kind: typeof DELIVERY_KIND;
+  id: string;
+  at: string;
+  reason: DeliveryReason;
+  target: string | null;
+  pid: number;
+  appName: string;
+  updatedAt: string;
+  sig: string;
+  workspaceFolders: string[];
+  activeFile: string;
+  relativePath: string;
+  languageId: string;
+  selection: SelectionInfo | null;
+  /** The rendered one-line address, as the ambient file renders it. */
+  address: string;
+  /** The selected text, or `''` when it was not requested or is empty. */
+  text: string;
+  /** True when `text` was cut short by `maxTextBytes`. */
+  textTruncated: boolean;
+}
+
+/**
+ * Cut the selected text to a byte budget.
+ *
+ * Bytes, not characters, because the budget exists to bound what lands on disk
+ * and in a model's context, and both are measured in bytes. A partial trailing
+ * character from the cut is dropped rather than left as U+FFFD.
+ * @param text - the raw selection.
+ * @param include - whether text was requested at all.
+ * @param maxBytes - budget; non-positive or non-finite disables the cap.
+ * @returns the text to ship and whether it was cut.
+ */
+export function fitText(text: string, include: boolean, maxBytes: number): { text: string; truncated: boolean } {
+  if (!include || text === '') return { text: '', truncated: false };
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) return { text, truncated: false };
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return { text, truncated: false };
+  const cut = Buffer.from(text, 'utf8').subarray(0, maxBytes).toString('utf8').replace(/\uFFFD+$/u, '');
+  return { text: cut, truncated: true };
+}
+
+/**
+ * Build one delivery, or `undefined` when nothing may be published.
+ *
+ * Excluded paths produce no delivery at all — not an empty one — because the
+ * exclusion rule is about the path existing in a message, not about its content.
+ * @param input - the position, the text, and the policy.
+ * @returns the payload, or `undefined`.
+ */
+export function buildDelivery(input: DeliveryInput): Delivery | undefined {
+  const address = renderContext(input);
+  if (address === '') return undefined;
+  const { text, truncated } = fitText(input.selectedText, input.includeText, input.maxTextBytes);
+  return {
+    version: 1,
+    kind: DELIVERY_KIND,
+    id: input.id,
+    at: input.now,
+    reason: input.reason,
+    target: input.target,
+    pid: input.pid,
+    appName: input.appName,
+    updatedAt: input.now,
+    sig: signatureOf(input),
+    address,
+    workspaceFolders: input.workspaceFolders,
+    activeFile: input.activeFile,
+    relativePath: input.relativePath,
+    languageId: input.languageId,
+    selection: input.selection,
+    text,
+    textTruncated: truncated,
+  };
+}
+
+/**
+ * Who an event reaches.
+ *
+ * An explicit send goes to everyone unless the user named one subscriber; a
+ * selection change reaches only the subscribers that asked for a continuous
+ * feed, because that is the only case where text lands on disk without anyone
+ * asking for it just then.
+ * @param subscribers - the registry.
+ * @param reason - why the delivery is being produced.
+ * @param target - a subscriber name for a targeted send, or `null`.
+ * @returns the recipients.
+ */
+export function recipients<T extends SubscriptionPolicy>(
+  subscribers: readonly T[],
+  reason: DeliveryReason,
+  target: string | null,
+): T[] {
+  if (reason === 'change') return subscribers.filter((subscriber) => subscriber.autoSelection);
+  if (target === null) return [...subscribers];
+  return subscribers.filter((subscriber) => subscriber.name === target);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Wire protocol                                                              */
+/* -------------------------------------------------------------------------- */
+
+/** Protocol version carried by the `hello` frame. */
+export const PROTOCOL = 'editor-context/1';
+
+/** A frame the publisher sends. */
+export type ServerFrame =
+  | {
+      type: 'hello';
+      protocol: typeof PROTOCOL;
+      appName: string;
+      pid: number;
+      workspaceFolders: string[];
+      /** Whether the subscriber must present a token before it is served. */
+      requiresToken: boolean;
+    }
+  | { type: 'subscribed'; name: string; includeText: boolean; autoSelection: boolean }
+  | { type: 'delivery'; delivery: Delivery }
+  | { type: 'error'; message: string };
+
+/**
+ * The one frame a subscriber sends.
+ *
+ * Everything is optional: a bare `{"type":"subscribe"}` is a valid registration
+ * that receives explicit sends with text and no continuous feed, which is the
+ * safe default in both directions.
+ */
+export interface SubscribeFrame {
+  type: 'subscribe';
+  name?: string;
+  label?: string;
+  includeText?: boolean;
+  autoSelection?: boolean;
+  token?: string;
+}
+
+/**
+ * Turn a subscribe frame into a policy, filling in the safe defaults.
+ * @param frame - the received frame.
+ * @param fallbackName - identity to use when the frame omits one.
+ * @returns the policy.
+ */
+export function policyFromFrame(frame: SubscribeFrame, fallbackName: string): SubscriptionPolicy {
+  const name = typeof frame.name === 'string' && frame.name.trim() !== '' ? frame.name.trim() : fallbackName;
+  const label = typeof frame.label === 'string' && frame.label.trim() !== '' ? frame.label.trim() : name;
+  return {
+    name,
+    label,
+    includeText: frame.includeText !== false,
+    autoSelection: frame.autoSelection === true,
+  };
+}
+
+/** Whether a bind address is loopback, and therefore needs no token. */
+export function isLoopbackHost(host: string): boolean {
+  const value = host.trim().toLowerCase();
+  return value === '127.0.0.1' || value === '::1' || value === 'localhost' || value === '127.0.0.0/8';
 }
