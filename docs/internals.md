@@ -148,6 +148,25 @@ accident.
 extension's own listener set is cleared on dispose; a throwing listener is caught
 and ignored, because a subscriber's bug is not the publisher's problem.
 
+### Why each window announces its own endpoint
+
+A socket needs a port, and a port is a constant that only one process can hold.
+The obvious design — "everyone dials 7788" — makes the second window of a
+project silently unreachable, which is exactly what happened in practice.
+
+So the configured port is a **preference**. The window tries it, and on
+`EADDRINUSE` binds an ephemeral port instead, then writes
+`endpoints/<pid>.json`: the port it actually got, who it is, and a heartbeat.
+Announcing only after `listen` succeeds matters — an announcement for a port that
+is not open is worse than no announcement, because it sends the reader somewhere
+useless.
+
+The reader's rule is the interesting half: keep an entry only when the pid is
+alive **and** the heartbeat is recent. Pids are reused, so liveness alone can
+point at an unrelated process; freshness alone would forgive a window that
+crashed a minute ago. The directory is cleaned on activation, because a crashed
+window cannot withdraw its own file.
+
 ### Details that are load-bearing
 
 - **`excludeGlobs` produces no delivery**, not an empty one. The rule is about the

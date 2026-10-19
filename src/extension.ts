@@ -24,6 +24,7 @@ import * as vscode from 'vscode';
 import { createPublisher, type Publisher } from './server';
 import {
   buildDelivery,
+  buildEndpointRecord,
   buildWindowState,
   recipients,
   signatureOf,
@@ -36,10 +37,13 @@ import {
 } from './core';
 import {
   readSubscribers,
+  removeEndpoint,
   removeWindowState,
   resolveStateDir,
+  sweepEndpoints,
   windowFile,
   writeDelivery,
+  writeEndpoint,
   writeWindowState,
 } from './state';
 
@@ -57,6 +61,18 @@ const listeners = new Set<(delivery: Delivery) => void>();
 
 /** The WebSocket publisher, when it is running. */
 let publisher: Publisher | undefined;
+
+/** Where this window's endpoint was announced, so it can be withdrawn later. */
+let endpointDir = '';
+
+/** Heartbeat that keeps the announcement fresh, so an idle window is not "dead". */
+let endpointTimer: NodeJS.Timeout | undefined;
+
+/** How often the announcement is re-written. */
+const ENDPOINT_HEARTBEAT_MS = 60_000;
+
+/** This extension's version, reported in the announcement. */
+let extensionVersion = '0.0.0';
 
 /** Signature of the last applied socket config, so a restart happens only on change. */
 let publisherSignature = '';
@@ -348,6 +364,60 @@ async function addToBotPicker(pid: number): Promise<void> {
   await addToBot(pid, picked.target);
 }
 
+/**
+ * Announce this window's endpoint, and keep it fresh.
+ *
+ * Written only once the socket is listening: the whole record is about where to
+ * dial, so announcing a port that is not open would be worse than announcing
+ * nothing. The heartbeat is for the reader — an idle window writes no state, and
+ * without a refresh a quiet window and a closed one would look identical.
+ * @param pid - this window's extension-host pid.
+ */
+async function announceEndpoint(pid: number): Promise<void> {
+  if (publisher === undefined || publisher.url === '') {
+    await withdrawEndpoint(pid);
+    return;
+  }
+  const cfg = configuration();
+  const dir = stateDirOf(cfg);
+  // A reconfigured state directory must not leave the old announcement behind.
+  if (endpointDir !== '' && endpointDir !== dir) await removeEndpoint(endpointDir, pid).catch(() => undefined);
+  endpointDir = dir;
+  try {
+    await writeEndpoint(
+      dir,
+      buildEndpointRecord({
+        pid,
+        port: publisher.port,
+        url: publisher.url,
+        appName: vscode.env.appName,
+        extensionVersion,
+        workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+        requiresToken: cfg.get<string>('ws.token', '') !== '',
+        now: new Date().toISOString(),
+      }),
+    );
+  } catch (error) {
+    log(`could not announce the endpoint in ${dir} — ${String(error)}`);
+    return;
+  }
+  endpointTimer ??= setInterval(() => {
+    void announceEndpoint(pid);
+  }, ENDPOINT_HEARTBEAT_MS);
+  // A heartbeat must never be the reason the editor stays alive.
+  endpointTimer.unref?.();
+}
+
+/** Withdraw the announcement and stop refreshing it. */
+async function withdrawEndpoint(pid: number): Promise<void> {
+  if (endpointTimer !== undefined) clearInterval(endpointTimer);
+  endpointTimer = undefined;
+  const dir = endpointDir;
+  endpointDir = '';
+  if (dir === '') return;
+  await removeEndpoint(dir, pid).catch(() => undefined);
+}
+
 /** Restart the socket publisher when its configuration changed, and only then. */
 async function syncPublisher(pid: number): Promise<void> {
   const cfg = configuration();
@@ -366,6 +436,7 @@ async function syncPublisher(pid: number): Promise<void> {
   publisher = undefined;
   if (!enabled) {
     log('WebSocket publisher disabled (editorContext.ws.enabled)');
+    await withdrawEndpoint(pid);
     return;
   }
   publisher = await createPublisher({
@@ -375,6 +446,7 @@ async function syncPublisher(pid: number): Promise<void> {
     workspaceFolders: () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
     log,
   });
+  await announceEndpoint(pid);
 }
 
 /** Show the address a subscriber should dial. */
@@ -388,7 +460,7 @@ async function showSocket(pid: number): Promise<void> {
   }
   const clients = publisher.clients();
   const picked = await vscode.window.showInformationMessage(
-    `Editor Context: ${publisher.url} — ${String(clients.length)} subscriber(s) connected`,
+    `Editor Context: ${publisher.url} — ${String(clients.length)} subscriber(s) connected (announced in endpoints/${String(pid)}.json)`,
     'Copy URL',
     'Show Output',
   );
@@ -432,11 +504,22 @@ export function activate(context: vscode.ExtensionContext): {
         listeners.clear();
         void publisher?.dispose();
         publisher = undefined;
+        void withdrawEndpoint(pid);
         const dir = lastDir === '' ? resolveStateDir() : lastDir;
         void removeWindowState(dir, pid);
       },
     },
   );
+
+  extensionVersion =
+    typeof context.extension?.packageJSON?.version === 'string' ? context.extension.packageJSON.version : '0.0.0';
+
+  // Announcements from windows that are gone are the registry's only teeth: a
+  // crashed editor cannot withdraw its own entry, and a reader that trusts the
+  // file would dial a port that now belongs to something else.
+  void sweepEndpoints(stateDirOf(configuration())).then((removed) => {
+    if (removed.length > 0) log(`withdrew ${String(removed.length)} stale endpoint announcement(s): ${removed.join(', ')}`);
+  });
 
   schedule(pid);
   void syncPublisher(pid);

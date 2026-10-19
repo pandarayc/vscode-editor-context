@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -17,7 +17,12 @@ const require = createRequire(import.meta.url);
 const {
   MAX_INBOX,
   MAX_REQUESTS,
+  endpointFile,
+  endpointsDir,
   isSafeSubscriberName,
+  removeEndpoint,
+  sweepEndpoints,
+  writeEndpoint,
   readSubscribers,
   requestsDir,
   requestFile,
@@ -151,6 +156,48 @@ test('the window document is untouched by all of this', async () => {
   await writeDelivery(dir, null, document());
   assert.deepEqual(await readdir(join(dir, 'windows')), ['7.json']);
   assert.equal((await readdir(requestsDir(dir))).length, 1);
+});
+
+test('an endpoint announcement round-trips and can be withdrawn', async () => {
+  const dir = await freshDir();
+  const record = {
+    version: 1,
+    pid: process.pid,
+    port: 51234,
+    url: 'ws://127.0.0.1:51234/editor-context',
+    protocol: 'editor-context/1',
+    appName: 'Cursor',
+    extensionVersion: '0.5.0',
+    workspaceFolders: ['/w'],
+    requiresToken: false,
+    updatedAt: '2026-10-19T00:00:00.000Z',
+  };
+  await writeEndpoint(dir, record);
+  const file = endpointFile(dir, process.pid);
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), record);
+  assert.equal('token' in (JSON.parse(await readFile(file, 'utf8'))), false, 'a secret never goes in the registry');
+
+  await removeEndpoint(dir, process.pid);
+  await assert.rejects(stat(file), 'withdrawing removes the file rather than emptying it');
+});
+
+test('the sweep drops dead and stale announcements, and leaves everything else alone', async () => {
+  const dir = await freshDir();
+  await mkdir(endpointsDir(dir), { recursive: true });
+  const at = (pid) => join(endpointsDir(dir), `${pid}.json`);
+  const old = new Date(Date.now() - 3_600_000);
+
+  await writeFile(at(100), '{}', 'utf8'); // alive, fresh
+  await writeFile(at(200), '{}', 'utf8'); // pid gone
+  await writeFile(at(300), '{}', 'utf8'); // pid alive but no heartbeat for an hour
+  await writeFile(at(process.pid), '{}', 'utf8'); // our own
+  await writeFile(join(endpointsDir(dir), 'notes.txt'), 'not ours', 'utf8');
+  await utimes(at(300), old, old);
+
+  const removed = await sweepEndpoints(dir, { isAlive: (pid) => pid === 100 || pid === 300 });
+  assert.deepEqual(removed.sort(), [200, 300]);
+  assert.deepEqual((await readdir(endpointsDir(dir))).sort(), ['100.json', `${String(process.pid)}.json`, 'notes.txt']);
+  assert.deepEqual(await sweepEndpoints(join(dir, 'nowhere')), [], 'a missing directory is an empty registry');
 });
 
 after(async () => {

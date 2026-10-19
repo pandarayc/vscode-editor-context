@@ -228,10 +228,20 @@ test('a plain HTTP request is told what this endpoint speaks', async () => {
   assert.match(await response.text(), /WebSocket only/);
 });
 
-test('a port already in use is reported, not thrown', async () => {
+test('a second window on a taken port binds an ephemeral one instead of standing down', async () => {
   const first = await publisher();
   const busy = Number(new URL(first.server.url).port);
   const second = await publisher({ port: busy });
+  assert.notEqual(second.server.url, '', 'a taken port is the normal case for the second window, not a failure');
+  assert.notEqual(second.server.port, busy);
+  assert.notEqual(second.server.port, 0);
+  assert.match(second.lines.join('\n'), /already taken .*ephemeral/);
+});
+
+test('with the fallback off, a taken port is reported, not thrown', async () => {
+  const first = await publisher();
+  const busy = Number(new URL(first.server.url).port);
+  const second = await publisher({ port: busy, ephemeralFallback: false });
   assert.equal(second.server.url, '', 'a taken port must not stop the editor from working');
   assert.match(second.lines.join('\n'), /could not listen/);
 });

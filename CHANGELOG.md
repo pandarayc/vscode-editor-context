@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.0 — 2026-10-19
+
+Every window announces its own endpoint, so the port stops being a shared
+constant.
+
+- **Added** — `~/.editor-context/endpoints/<pid>.json`: one announcement per
+  window, written once the socket is listening, refreshed on a one-minute
+  heartbeat, withdrawn on unload or when the publisher is disabled. It carries
+  the port actually bound, the app name, the extension version, the workspace
+  folders and whether a token is required — never the token itself.
+- **Added** — stale announcements are swept on activation: an entry is kept only
+  when its pid is alive *and* its heartbeat is recent. A crashed window cannot
+  withdraw its own file, and `pid` alone is not proof of identity because pids are
+  reused.
+- **Changed** — a taken port is no longer the end of the story. The configured
+  port is tried first and, if another window holds it, the publisher binds an
+  ephemeral port and announces that instead. This is what makes the second
+  window of a project reachable at all; before, it simply had no socket.
+  `ephemeralFallback: false` restores the old stand-down behaviour.
+- **Changed** — `Publisher` exposes the port it actually bound, and the
+  **Show WebSocket Address** message names the announcement file.
+
 ## 0.4.0 — 2026-10-17
 
 Publish over a socket, so a subscriber does not need the filesystem at all.

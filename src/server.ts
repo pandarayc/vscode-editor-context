@@ -49,6 +49,8 @@ export interface PublisherClient extends SubscriptionPolicy {
 export interface Publisher {
   /** The URL a subscriber should dial, or `''` when the port could not be bound. */
   readonly url: string;
+  /** The port actually bound, or `0` when nothing is listening. */
+  readonly port: number;
   /** A snapshot of the connected subscribers. */
   clients(): PublisherClient[];
   /** Send one frame to one client. A dead socket is dropped, not thrown. */
@@ -73,6 +75,12 @@ export interface PublisherOptions {
   subscribeTimeoutMs?: number;
   /** Ping interval. */
   heartbeatMs?: number;
+  /**
+   * Bind an ephemeral port when the configured one is taken, instead of standing
+   * down. Defaults to on: a second editor window should join the registry rather
+   * than be told its socket is unavailable.
+   */
+  ephemeralFallback?: boolean;
 }
 
 /** Internal record: a policy plus the socket it arrived on. */
@@ -102,10 +110,11 @@ export async function createPublisher(options: PublisherOptions): Promise<Publis
     log,
     subscribeTimeoutMs = SUBSCRIBE_TIMEOUT_MS,
     heartbeatMs = HEARTBEAT_MS,
+    ephemeralFallback = true,
   } = options;
   if (!isLoopbackHost(host) && token === '') {
     log(`refusing to bind ${host} without a token: set editorContext.ws.token or bind 127.0.0.1`);
-    return { url: '', clients: () => [], send: () => undefined, dispose: async () => undefined };
+    return { url: '', port: 0, clients: () => [], send: () => undefined, dispose: async () => undefined };
   }
 
   let nextId = 0;
@@ -122,11 +131,16 @@ export async function createPublisher(options: PublisherOptions): Promise<Publis
   // An `error` on either object with no listener is an uncaught exception, which
   // in an editor means a broken extension host rather than a log line.
   wss.on('error', (error: Error) => {
+    if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') return;
     log(`socket server error — ${error.message}`);
   });
   server.on('error', (error: Error) => {
     // Kept attached for the server's whole life, not `once`: a second emission
     // finding no listener is exactly how this becomes a crash.
+    // A taken port is expected — it is how the second window is recognised — and
+    // the bind attempt either falls back or reports it, so repeating it here as
+    // an "error" would make the normal case read like a crash.
+    if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') return;
     log(`http server error — ${error.message}`);
   });
 
@@ -228,24 +242,45 @@ export async function createPublisher(options: PublisherOptions): Promise<Publis
   // A heartbeat must never be the reason the editor stays alive.
   heartbeat.unref?.();
 
-  const listening = await new Promise<number | undefined>((resolve) => {
-    server.once('error', () => {
-      resolve(undefined);
+  /**
+   * One bind attempt.
+   *
+   * The error has to come back to the caller rather than being swallowed, because
+   * "someone else holds this port" is a case we can still recover from, and it is
+   * the normal state on the second window of a project.
+   */
+  const attemptListen = (target: number): Promise<{ port: number } | { error: NodeJS.ErrnoException }> =>
+    new Promise((resolve) => {
+      const onError = (error: NodeJS.ErrnoException): void => {
+        server.off('error', onError);
+        resolve({ error });
+      };
+      server.on('error', onError);
+      server.listen(target, host, () => {
+        server.off('error', onError);
+        const address = server.address();
+        resolve({ port: typeof address === 'object' && address !== null ? address.port : target });
+      });
     });
-    server.listen(port, host, () => {
-      const address = server.address();
-      resolve(typeof address === 'object' && address !== null ? address.port : port);
-    });
-  });
 
-  if (listening === undefined) {
+  let attempt = await attemptListen(port);
+  if ('error' in attempt && ephemeralFallback && port !== 0 && attempt.error.code === 'EADDRINUSE') {
+    log(
+      `port ${String(port)} is already taken (another editor window?) — binding an ephemeral port and announcing it instead`,
+    );
+    attempt = await attemptListen(0);
+  }
+
+  if ('error' in attempt) {
     // A port someone else holds must not stop the extension from activating, and
     // must not leave a half-built server behind either.
     clearInterval(heartbeat);
     wss.close();
-    log(`could not listen on ${host}:${String(port)} — is another editor window using that port?`);
-    return { url: '', clients: () => [], send: () => undefined, dispose: async () => undefined };
+    log(`could not listen on ${host}:${String(port)} — ${attempt.error.message}`);
+    return { url: '', port: 0, clients: () => [], send: () => undefined, dispose: async () => undefined };
   }
+
+  const listening = attempt.port;
 
   const shown = host.includes(':') ? `[${host}]` : host;
   const url = `ws://${shown}:${String(listening)}${path}`;
@@ -253,6 +288,7 @@ export async function createPublisher(options: PublisherOptions): Promise<Publis
 
   return {
     url,
+    port: listening,
     clients() {
       return [...connections.values()].filter((connection) => connection.subscribed).map((connection) => ({
         id: connection.id,

@@ -11,9 +11,9 @@
  * parses both directories with the same code.
  */
 
-import { mkdir, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 
-import type { SubscriberManifest } from './core';
+import type { EndpointRecord, SubscriberManifest } from './core';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -230,4 +230,105 @@ export async function pruneInbox(inbox: string, keep: number): Promise<void> {
   for (const name of documents.slice(0, Math.max(0, documents.length - keep))) {
     await unlink(join(inbox, name)).catch(() => undefined);
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Endpoints                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * How long an endpoint announcement is trusted without a heartbeat refresh.
+ *
+ * The heartbeat is a minute, so this tolerates nine missed beats — a suspended
+ * laptop should not make its own window look dead the moment it resumes.
+ */
+export const ENDPOINT_MAX_AGE_MS = 10 * 60_000;
+
+/** Directory holding one announcement per editor window. */
+export function endpointsDir(dir: string): string {
+  return join(dir, 'endpoints');
+}
+
+/** Path of one window's announcement. */
+export function endpointFile(dir: string, pid: number): string {
+  return join(endpointsDir(dir), `${pid}.json`);
+}
+
+/**
+ * Announce this window's endpoint, replacing any previous announcement.
+ * @param dir - state directory.
+ * @param record - identity plus the port actually bound.
+ */
+export async function writeEndpoint(dir: string, record: EndpointRecord): Promise<void> {
+  await mkdir(endpointsDir(dir), { recursive: true });
+  await writeAtomic(endpointFile(dir, record.pid), record);
+}
+
+/** Withdraw one window's announcement; called on unload and on reconfiguration. */
+export async function removeEndpoint(dir: string, pid: number): Promise<void> {
+  await rm(endpointFile(dir, pid), { force: true });
+}
+
+/**
+ * Whether a process id is running.
+ *
+ * `EPERM` counts as alive on purpose: it means the process exists and belongs to
+ * someone else, which is not the same as "gone" — and a registry that deletes an
+ * entry it merely cannot signal is worse than one that leaves it.
+ * @param pid - process id.
+ * @returns whether it is running.
+ */
+export function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Drop announcements that cannot be trusted.
+ *
+ * An entry is kept only when its process is alive *and* its heartbeat is recent.
+ * Both halves matter: a dead pid is the common case, but pids are reused, and a
+ * stale timestamp catches the recycled one. Files whose name is not a pid are
+ * left alone — this directory is shared, and deleting what it does not
+ * understand is not its job.
+ * @param dir - state directory.
+ * @param options - clock, freshness window, and the liveness probe.
+ * @returns the pids whose announcements were removed.
+ */
+export async function sweepEndpoints(
+  dir: string,
+  {
+    now = Date.now(),
+    maxAgeMs = ENDPOINT_MAX_AGE_MS,
+    isAlive = processAlive,
+  }: { now?: number; maxAgeMs?: number; isAlive?: (pid: number) => boolean } = {},
+): Promise<number[]> {
+  let names: string[];
+  try {
+    names = await readdir(endpointsDir(dir));
+  } catch {
+    return [];
+  }
+  const removed: number[] = [];
+  for (const name of names) {
+    const match = /^(\d+)\.json$/.exec(name);
+    if (match === null) continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid) continue;
+    const file = join(endpointsDir(dir), name);
+    let fresh: boolean;
+    try {
+      fresh = now - (await stat(file)).mtimeMs <= maxAgeMs;
+    } catch {
+      continue;
+    }
+    if (fresh && isAlive(pid)) continue;
+    await unlink(file).catch(() => undefined);
+    removed.push(pid);
+  }
+  return removed;
 }

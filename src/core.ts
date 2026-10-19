@@ -248,6 +248,71 @@ export interface SubscriptionPolicy {
  */
 export interface SubscriberManifest extends SubscriptionPolicy {}
 
+/**
+ * One editor window, as announced in `endpoints/<pid>.json`.
+ *
+ * This is the *registry* half of the topology. The extension still serves its own
+ * socket, but nothing may assume a fixed port any more: a window binds the
+ * configured port when it is free and an ephemeral one when another window
+ * already holds it, then writes the result here. A consumer reads the directory,
+ * drops the entries whose process is gone, and dials what is left. That is what
+ * makes a second window, a restart, or a crashed window need no coordination.
+ *
+ * The token is never written: a shared secret in a file is a secret the reader
+ * then has to protect, and `requiresToken` is all a client needs to know.
+ */
+export interface EndpointRecord {
+  version: 1;
+  pid: number;
+  /** The port actually bound — the configured one, or the ephemeral fallback. */
+  port: number;
+  /** A dialable URL, so a consumer never has to assemble one. */
+  url: string;
+  protocol: string;
+  appName: string;
+  extensionVersion: string;
+  workspaceFolders: string[];
+  requiresToken: boolean;
+  /**
+   * ISO-8601, refreshed on a heartbeat. A window with nothing to say writes
+   * nothing to its state file, so without this a live-but-idle window and a dead
+   * one would look identical to a reader.
+   */
+  updatedAt: string;
+}
+
+/** Input for {@link buildEndpointRecord}. */
+export interface EndpointInput {
+  pid: number;
+  port: number;
+  url: string;
+  appName: string;
+  extensionVersion: string;
+  workspaceFolders: string[];
+  requiresToken: boolean;
+  now: string;
+}
+
+/**
+ * Build the endpoint record a window announces.
+ * @param input - identity, the bound port, and the timestamp.
+ * @returns the record.
+ */
+export function buildEndpointRecord(input: EndpointInput): EndpointRecord {
+  return {
+    version: 1,
+    pid: input.pid,
+    port: input.port,
+    url: input.url,
+    protocol: PROTOCOL,
+    appName: input.appName,
+    extensionVersion: input.extensionVersion,
+    workspaceFolders: [...input.workspaceFolders],
+    requiresToken: input.requiresToken,
+    updatedAt: input.now,
+  };
+}
+
 /** Position fields plus the delivery envelope and its text policy. */
 export interface DeliveryInput extends PositionInput {
   id: string;

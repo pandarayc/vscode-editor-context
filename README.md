@@ -71,6 +71,15 @@ The same two knobs as a manifest, so routing is one function whatever transport 
 subscriber arrived on. **Editor Context: Show WebSocket Address** prints the URL
 and the number of connected subscribers.
 
+Every window also **announces where it is listening** in
+`~/.editor-context/endpoints/<pid>.json` — the port it actually got, the app
+name, the workspace folders, and a heartbeat every minute. The configured port is
+a preference, not a rule: a second window that finds 7788 taken binds an
+ephemeral port instead and announces that, so two windows of the same project
+both stay reachable. A consumer reads the directory, ignores the entries whose
+process is gone, and dials what is left — no fixed port to configure, and nothing
+to re-coordinate when a window restarts.
+
 A non-loopback `ws.host` is **refused unless `ws.token` is set**; the token is
 checked before the policy is applied, so a client that guessed wrong learns
 nothing about what it would have received.
@@ -206,7 +215,7 @@ cat ~/.editor-context/windows/*.json
 | `editorContext.maxTextBytes` | `20000` | Byte budget for that text; `0` disables the cap |
 | `editorContext.ws.enabled` | `true` | Run the WebSocket publisher |
 | `editorContext.ws.host` | `127.0.0.1` | Bind address. Non-loopback is refused without a token |
-| `editorContext.ws.port` | `7788` | `0` picks a free port, which changes the address every restart |
+| `editorContext.ws.port` | `7788` | Preferred port. If it is taken, the window binds an ephemeral one and announces it in `endpoints/<pid>.json`; `0` always asks for an ephemeral port |
 | `editorContext.ws.path` | `/editor-context` | Endpoint path |
 | `editorContext.ws.token` | empty | Shared secret required in the `subscribe` frame |
 | `editorContext.stateDir` | empty → `~/.editor-context` | Move the directory |
