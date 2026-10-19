@@ -3,7 +3,7 @@
   "displayName": "Editor Context \u2014 share what you're looking at",
   "description": "Publishes the file, line range and selected text you are looking at in Cursor/VS Code, in process to sibling extensions and on disk to subscribed agents.",
   "icon": "icon.png",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "license": "MIT",
   "publisher": "pandarayc",
   "engines": {

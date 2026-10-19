@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1 — 2026-10-19
+
+A heartbeat a client can actually see.
+
+- **Added** — `{ "type": "heartbeat", "at": … }` every 30s on every connection,
+  alongside the existing protocol ping. A browser-style WebSocket answers a
+  protocol ping at the transport layer and never surfaces it, so a client had no
+  way to tell "quiet" from "dead" — the peer-side watchdog was firing on healthy
+  idle links. The ping stays (it is what detects a dead *client*); this frame is
+  what a subscriber's watchdog can see.
+
 ## 0.5.0 — 2026-10-19
 
 Every window announces its own endpoint, so the port stops being a shared

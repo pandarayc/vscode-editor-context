@@ -457,6 +457,15 @@ export type ServerFrame =
       requiresToken: boolean;
     }
   | { type: 'subscribed'; name: string; includeText: boolean; autoSelection: boolean }
+  /**
+   * Application-level keepalive.
+   *
+   * A protocol ping is invisible to a browser WebSocket client — it answers the
+   * pong at the TCP layer and never surfaces the frame — so a client cannot use
+   * ping/pong to tell "quiet" from "dead". This frame can be seen, which is what
+   * makes a client-side watchdog possible at all.
+   */
+  | { type: 'heartbeat'; at: string }
   | { type: 'delivery'; delivery: Delivery }
   | { type: 'error'; message: string };
 

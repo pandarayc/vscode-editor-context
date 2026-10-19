@@ -215,6 +215,17 @@ test('a closed socket leaves the routing table', async () => {
   assert.deepEqual(server.clients(), []);
 });
 
+test('a subscribed client is kept awake by a visible heartbeat frame', async () => {
+  const { server } = await publisher({ heartbeatMs: 40 });
+  const client = track(connect(server.url));
+  await client.opened;
+  client.send({ type: 'subscribe', name: 'dsh' });
+  await client.next((frame) => frame.type === 'subscribed');
+
+  const beat = await client.next((frame) => frame.type === 'heartbeat', 1_000);
+  assert.match(beat.at, /^\d{4}-\d{2}-\d{2}T/, 'a protocol ping never reaches a browser client; this frame does');
+});
+
 test('binding a non-loopback address without a token is refused, not attempted', async () => {
   const { server, lines } = await publisher({ host: '0.0.0.0' });
   assert.equal(server.url, '');

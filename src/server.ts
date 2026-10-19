@@ -237,6 +237,13 @@ export async function createPublisher(options: PublisherOptions): Promise<Publis
       }
       connection.alive = false;
       connection.socket.ping();
+      // The ping keeps the TCP layer honest; this keeps the *client's* watchdog
+      // honest, since a browser-style WebSocket never sees protocol pings.
+      try {
+        connection.socket.send(frame({ type: 'heartbeat', at: new Date().toISOString() }));
+      } catch {
+        // A socket that died since the last tick is dropped by its close handler.
+      }
     }
   }, heartbeatMs);
   // A heartbeat must never be the reason the editor stays alive.
