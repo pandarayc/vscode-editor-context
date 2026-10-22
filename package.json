@@ -1,9 +1,9 @@
 {
   "name": "editor-context-bridge",
-  "displayName": "Editor Context \u2014 share what you're looking at",
+  "displayName": "Editor Context — share what you're looking at",
   "description": "Publishes the file, line range and selected text you are looking at in Cursor/VS Code, in process to sibling extensions and on disk to subscribed agents.",
   "icon": "icon.png",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "license": "MIT",
   "publisher": "pandarayc",
   "engines": {
@@ -45,7 +45,7 @@
             "**/.ssh/**",
             "**/node_modules/**"
           ],
-          "markdownDescription": "Files matching any of these globs are never published \u2014 the agent is told nothing at all, not even the path. A pattern containing `/` matches the workspace-relative path; a bare pattern matches the file name."
+          "markdownDescription": "Files matching any of these globs are never published — the agent is told nothing at all, not even the path. A pattern containing `/` matches the workspace-relative path; a bare pattern matches the file name."
         },
         "editorContext.language": {
           "type": "string",
@@ -109,7 +109,7 @@
       },
       {
         "command": "editorContext.addToBotTargeted",
-        "title": "Editor Context: Add to Bot (choose recipient)\u2026",
+        "title": "Editor Context: Add to Bot (choose recipient)…",
         "icon": "$(send)"
       },
       {
