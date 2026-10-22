@@ -187,16 +187,21 @@ test('the sweep drops dead and stale announcements, and leaves everything else a
   const at = (pid) => join(endpointsDir(dir), `${pid}.json`);
   const old = new Date(Date.now() - 3_600_000);
 
-  await writeFile(at(100), '{}', 'utf8'); // alive, fresh
+  // When the test process itself happens to be pid 100, the "alive" fixture and
+  // the "our own" fixture below would be the same file and the expectations
+  // would silently disagree. Pick a neighbour in that case.
+  const alive = process.pid === 100 ? 101 : 100;
+
+  await writeFile(at(alive), '{}', 'utf8'); // alive, fresh
   await writeFile(at(200), '{}', 'utf8'); // pid gone
   await writeFile(at(300), '{}', 'utf8'); // pid alive but no heartbeat for an hour
   await writeFile(at(process.pid), '{}', 'utf8'); // our own
   await writeFile(join(endpointsDir(dir), 'notes.txt'), 'not ours', 'utf8');
   await utimes(at(300), old, old);
 
-  const removed = await sweepEndpoints(dir, { isAlive: (pid) => pid === 100 || pid === 300 });
+  const removed = await sweepEndpoints(dir, { isAlive: (pid) => pid === alive || pid === 300 });
   assert.deepEqual(removed.sort(), [200, 300]);
-  assert.deepEqual((await readdir(endpointsDir(dir))).sort(), ['100.json', `${String(process.pid)}.json`, 'notes.txt']);
+  assert.deepEqual((await readdir(endpointsDir(dir))).sort(), [`${String(alive)}.json`, `${String(process.pid)}.json`, 'notes.txt']);
   assert.deepEqual(await sweepEndpoints(join(dir, 'nowhere')), [], 'a missing directory is an empty registry');
 });
 
