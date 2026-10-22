@@ -50,7 +50,7 @@ kinds of subscriber, and the difference is what lands on disk.
 **In process.** A sibling extension gets every event with no filesystem at all:
 
 ```ts
-const api = vscode.extensions.getExtension('pandarayc.editor-context')?.exports;
+const api = vscode.extensions.getExtension('pandarayc.editor-context-bridge')?.exports;
 const sub = api.subscribe((delivery) => { /* ... */ });
 ```
 

@@ -44,7 +44,7 @@
 **进程内。** 兄弟扩展不需要任何文件系统，就能拿到每一次事件：
 
 ```ts
-const api = vscode.extensions.getExtension('pandarayc.editor-context')?.exports;
+const api = vscode.extensions.getExtension('pandarayc.editor-context-bridge')?.exports;
 const sub = api.subscribe((delivery) => { /* ... */ });
 ```
 

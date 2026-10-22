@@ -144,7 +144,7 @@ cheap path needs no configuration and the expensive path cannot be enabled by
 accident.
 
 `subscribe()` is exported from `activate`, so a sibling extension reaches it with
-`vscode.extensions.getExtension('pandarayc.editor-context').exports`. The
+`vscode.extensions.getExtension('pandarayc.editor-context-bridge').exports`. The
 extension's own listener set is cleared on dispose; a throwing listener is caught
 and ignored, because a subscriber's bug is not the publisher's problem.
 
