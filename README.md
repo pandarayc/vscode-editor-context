@@ -1,4 +1,4 @@
-# editor-context
+# editor-context-bridge
 
 <img src="icon.png" width="96" alt="">
 
@@ -150,19 +150,41 @@ defeat it.
 | Agent | Install | Where the position lands |
 |---|---|---|
 | **DSH** | [`dsh-editor-context`](https://github.com/pandarayc/dsh-editor-context) | a chip in the composer — from `@`, or straight from the button — **use this one** |
-| **Claude Code** | the hook below | injected on the next prompt, on a changed position |
+| **Claude Code** | [the hook](#the-hook-not-recommended) | injected on the next prompt, on a changed position |
 | anything else | nothing | read the JSON |
 
-> **On DSH, skip the hook.** Measured, it appends one durable user message per
-> turn whenever the cursor is moving — a position is a high-cardinality dedup
-> key, so the "only when it changed" cache never fires. The chip exists because
-> of that measurement. The hook is kept for editors that are not driving DSH.
+### The hook (not recommended)
+
+The repository ships a `UserPromptSubmit` hook for editors that have no
+extension API, or for agents that only ever read a prompt. **On DSH, skip it.**
+Measured, it appends one durable user message per turn whenever the cursor is
+moving — a position is a high-cardinality dedup key, so the "only when it
+changed" cache never fires. The chip exists because of that measurement.
+
+```bash
+node scripts/install-dsh-hook.mjs              # copy the script, merge hooks.json
+node scripts/install-dsh-hook.mjs --print      # show the entry without writing
+```
+
+It preserves every existing hook and is idempotent. To remove it again, delete
+the `UserPromptSubmit` entry from `~/.dsh/hooks/hooks.json` and the copied
+`editor_context.py`; DSH reads that file once at process start, so either
+direction needs a restart.
 
 A request is served *before* the ambient reading by every consumer that reads the
 state directory, and exactly once: `windows/` is where the caret is, `requests/` is
 where you pointed.
 
 ## Install
+
+### From the Marketplace
+
+```
+pandarayc.editor-context-bridge
+```
+
+`code --install-extension pandarayc.editor-context-bridge` (or `cursor` in place
+of `code`), or search for **Editor Context** in the Extensions panel.
 
 ### Remote-SSH — Cursor runs on another machine
 
@@ -172,10 +194,11 @@ that does it ships in this repository rather than in the VSIX — the machine th
 needs it is precisely the one that cannot run `cursor`.
 
 ```bash
-node scripts/install-cursor-remote.mjs --vsix ./editor-context-0.4.0.vsix
+node scripts/install-cursor-remote.mjs --vsix ./editor-context-bridge-<version>.vsix
 ```
 
-It unpacks the VSIX into `~/.cursor-server/extensions/<publisher>.editor-context-<version>/`
+It unpacks the VSIX into
+`~/.cursor-server/extensions/<publisher>.editor-context-bridge-<version>/`
 and adds the entry to `extensions/extensions.json`, backing that file up first and
 replacing an existing entry rather than appending a duplicate. It probes
 `~/.cursor-server` and falls back to `~/.vscode-server`; `--server <dir>` is
@@ -184,7 +207,7 @@ explicit. No restart is needed — the extension host picks it up on its own.
 ### A window on this machine
 
 ```bash
-cursor --install-extension editor-context-0.4.0.vsix
+cursor --install-extension editor-context-bridge-<version>.vsix
 # or: Command Palette → Extensions: Install from VSIX…
 ```
 
@@ -231,18 +254,14 @@ a keybinding written against 0.2.0 keeps working.
 
 ## Limitations
 
-- **The hook's change cache may have to live inside your project.** DSH runs
-  hooks in the session's file sandbox, where `~/.editor-context` is readable but
-  not writable, so the cache falls back to `<session cwd>/.dsh/editor-context/`.
-  A `.dsh/` folder appearing in a project is that; add it to `.gitignore`. With
-  nowhere writable at all, the hook injects every turn rather than failing
-  silently.
 - **Whole ranges are not highlighted**, only addressed. Jumping the editor to a
   range would need an inbound channel, and the extension has none.
 - **With several windows open the most recently updated one wins.** There is no
   cross-process notion of the focused window.
-- **An unchanged position is not re-injected by the hook**, to save tokens. After
-  a compaction, move the caret to get it back.
+
+The hook has its own caveats — the change cache may have to live inside your
+project, and an unchanged position is never re-injected — which is part of why
+it is not the recommended path; see [The hook](#the-hook-not-recommended).
 
 ## Under the hood
 
@@ -254,7 +273,7 @@ subscriber registry and its inboxes. `src/server.ts` is the WebSocket publisher;
 `UserPromptSubmit` hook.
 
 ```bash
-npm run compile && npm test    # 59 passed
+npm run compile && npm test    # 63 passed
 ```
 
 For why the rendering is one terse line, why `context: ''` means two different

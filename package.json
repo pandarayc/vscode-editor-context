@@ -1,7 +1,7 @@
 {
   "name": "editor-context-bridge",
   "displayName": "Editor Context — share what you're looking at",
-  "description": "Publishes the file, line range and selected text you are looking at in Cursor/VS Code, in process to sibling extensions and on disk to subscribed agents.",
+  "description": "Publishes the file, line range and selected text you are looking at in Cursor/VS Code \u2014 over a WebSocket, in process to sibling extensions, and on disk to subscribed agents.",
   "icon": "icon.png",
   "version": "0.5.2",
   "license": "MIT",

@@ -1,4 +1,4 @@
-# editor-context
+# editor-context-bridge
 
 <img src="icon.png" width="96" alt="">
 
@@ -128,14 +128,35 @@ const sub = api.subscribe((delivery) => { /* ... */ });
 | Agent | 装什么 | 位置以什么形式到达 |
 |---|---|---|
 | **DSH** | [`dsh-editor-context`](https://github.com/pandarayc/dsh-editor-context) | 输入框里的一张 chip —— 从 `@` 选，或者直接用按钮 —— **用这个** |
-| **Claude Code** | 下面的 hook | 位置变化时自动注入 |
+| **Claude Code** | [hook](#hook不推荐) | 位置变化时自动注入 |
 | 其他 | 什么都不用装 | 直接读 JSON |
 
-> **用 DSH 就别装 hook。** 实测：光标动得多时它每回合追加一条 durable user 消息
-> ——位置是高基数去重键，「变了才注入」的去重实际上从不命中。chip 就是这次实测的
-> 产物。hook 保留给不接 DSH 的编辑器。
+### hook（不推荐）
+
+仓库里带了一个 `UserPromptSubmit` hook，给没有扩展 API 的编辑器、或只读 prompt 的
+agent 用。**接 DSH 就别装它。** 实测：光标动得多时它每回合追加一条 durable user
+消息——位置是高基数去重键，「变了才注入」的去重实际上从不命中。chip 就是这次实测的
+产物。
+
+```bash
+node scripts/install-dsh-hook.mjs              # 复制脚本、合并 hooks.json
+node scripts/install-dsh-hook.mjs --print      # 只打印条目，不写盘
+```
+
+它会保留已有 hook，且幂等。要移除，删掉 `~/.dsh/hooks/hooks.json` 里的
+`UserPromptSubmit` 条目和复制过去的 `editor_context.py` 即可；DSH 只在进程启动时读
+一次这个文件，所以装和删都要重启。
 
 ## 安装
+
+### 从 Marketplace 装
+
+```
+pandarayc.editor-context-bridge
+```
+
+`code --install-extension pandarayc.editor-context-bridge`（Cursor 把 `code` 换成
+`cursor`），或在扩展面板里搜 **Editor Context**。
 
 ### Remote-SSH：Cursor 跑在另一台机器上
 
@@ -144,10 +165,11 @@ const sub = api.subscribe((delivery) => { /* ... */ });
 机器，恰恰是跑不了 `cursor` 的那台。
 
 ```bash
-node scripts/install-cursor-remote.mjs --vsix ./editor-context-0.4.0.vsix
+node scripts/install-cursor-remote.mjs --vsix ./editor-context-bridge-<version>.vsix
 ```
 
-它把 VSIX 解到 `~/.cursor-server/extensions/<publisher>.editor-context-<version>/`，
+它把 VSIX 解到
+`~/.cursor-server/extensions/<publisher>.editor-context-bridge-<version>/`，
 再把条目写进 `extensions/extensions.json`——**会先备份**，而且幂等（重跑替换旧条目，
 不追加重复）。默认探测 `~/.cursor-server`，没有就退到 `~/.vscode-server`；用
 `--server <dir>` 显式指定。**装完不用重启**，扩展宿主会自己激活它。
@@ -155,7 +177,7 @@ node scripts/install-cursor-remote.mjs --vsix ./editor-context-0.4.0.vsix
 ### 本机窗口
 
 ```bash
-cursor --install-extension editor-context-0.4.0.vsix
+cursor --install-extension editor-context-bridge-<version>.vsix
 # 或命令面板：Extensions: Install from VSIX…
 ```
 
@@ -201,14 +223,11 @@ cat ~/.editor-context/windows/*.json
 
 ## 已知限制
 
-- **hook 的「变了才注入」缓存可能需要落进你的项目里。** DSH 在会话的文件沙箱里跑
-  hook，`~/.editor-context` **可读但不可写**，所以缓存退到
-  `<会话 cwd>/.dsh/editor-context/`。项目里多出 `.dsh/` 就是它，建议加进
-  `.gitignore`。两处都写不进去时，hook 退回「每轮都注入」而不是静默失效。
 - **只做寻址，不做整段高亮。** 让编辑器跳到某个区间需要一条入站通道，扩展没有。
 - **多窗口时取最近更新的那个。** 没有「哪个窗口是焦点窗口」的跨进程判定。
-- **位置没变时 hook 不重复注入**（省 token）。压缩（compact）之后位置若一直没动，
-  那行描述可能已经不在上下文里了——动一下光标即可。
+
+hook 另有自己的坑（缓存可能被迫落进项目里、位置没变时不重复注入），这也是它不推荐
+的原因，详见 [hook（不推荐）](#hook不推荐)。
 
 ## 内部细节
 
@@ -217,7 +236,7 @@ cat ~/.editor-context/windows/*.json
 `hooks/editor_context.py` 是零依赖的 Python 3.8+ `UserPromptSubmit` hook。
 
 ```bash
-npm run compile && npm test    # 59 passed
+npm run compile && npm test    # 63 passed
 ```
 
 关于「为什么渲染只有一行」「为什么 `context: ''` 同时表示两件事」，以及 hook 不能
