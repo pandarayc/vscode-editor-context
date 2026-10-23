@@ -2,7 +2,7 @@
 
 <img src="icon.png" width="96" alt="">
 
-> **[English](README.md) · [中文](README.zh.md)**
+> **[English](README.md) · [中文](README.zh-CN.md)**
 
 Publish the file and line range you are looking at in Cursor / VS Code, so an
 agent running on the same machine can read exactly that range.

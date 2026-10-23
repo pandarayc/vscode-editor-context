@@ -2,7 +2,7 @@
 
 <img src="icon.png" width="96" alt="">
 
-> **[English](README.md) · [中文](README.zh.md)**
+> **[English](README.md) · [中文](README.zh-CN.md)**
 
 把「你在 Cursor / VS Code 里正看着哪几行」发布出去，让同机运行的 agent 能读到那一段。
 
